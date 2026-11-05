@@ -187,6 +187,18 @@ final class Desk {
 
     // MARK: Commands, from the menus, the hotkeys and the gestures
 
+    func performBinding(_ action: CanvasBindingAction) {
+        switch action {
+        case .toggleOverview: toggle()
+        case .showOverview: current.showCanvas(fitAll: true)
+        case .returnToWindow:
+            // Unlike Toggle, this action never brings the canvas forward from a native window.
+            if NSApp.isActive { toggle() }
+        case .zoomIn: current.zoomCanvas(by: 1.25)
+        case .zoomOut: current.zoomCanvas(by: 0.8)
+        }
+    }
+
     func show() { current.show() }
 
     func showCanvas(fitAll: Bool) { current.showCanvas(fitAll: fitAll) }

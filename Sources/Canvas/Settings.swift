@@ -642,7 +642,7 @@ enum CaptureMethod: String, CaseIterable {
 final class SettingsWindowController: NSWindowController {
     /// The panes, in toolbar order.
     enum Tab: String, CaseIterable, Identifiable {
-        case general, canvas, background, windows, motion, howToUse, liveWindows, experimental
+        case general, canvas, background, windows, motion, input, howToUse, liveWindows, experimental
 
         var id: String { rawValue }
 
@@ -653,6 +653,7 @@ final class SettingsWindowController: NSWindowController {
             case .background: return "Background"
             case .windows: return "Windows"
             case .motion: return "Motion"
+            case .input: return "Keys & Mouse"
             case .howToUse: return "How to use"
             case .liveWindows: return "Live Windows"
             case .experimental: return "Experimental"
@@ -667,6 +668,7 @@ final class SettingsWindowController: NSWindowController {
             case .background: return "photo"
             case .windows: return "macwindow"
             case .motion: return "sparkles"
+            case .input: return "keyboard"
             case .howToUse: return "questionmark.circle"
             case .liveWindows: return "bolt"
             case .experimental: return "flask"
@@ -1118,6 +1120,7 @@ private struct SettingsPane: View {
         case .background: BackgroundSettingsView(model: model.background, presenter: presenter)
         case .windows: WindowsPane(model: model)
         case .motion: MotionPane(model: model)
+        case .input: CanvasBindingsSettingsView()
         case .howToUse: HowToUsePane(model: model)
         case .liveWindows: LiveWindowsPane(model: model)
         case .experimental: ExperimentalPane(model: model)

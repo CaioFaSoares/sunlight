@@ -49,20 +49,29 @@ struct AXWindow: @unchecked Sendable {
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return nil }
 
-        for element in windows {
-            let candidate = AXWindow(element: element, pid: pid)
-            if candidate.windowID == windowID { return candidate }
+        let candidates = windows.map { AXWindow(element: $0, pid: pid) }
+        // Resolve identity first, without asking every window for its frame (two AX round trips).
+        let ids = candidates.map(\.windowID)
+        if let exact = ids.firstIndex(where: { $0 == windowID && windowID != 0 }) { return candidates[exact] }
+        let frames = candidates.enumerated().map { ids[$0.offset] == nil ? $0.element.frame : nil }
+        guard let index = matchingIndex(windowID: windowID, approximateFrame: approximateFrame,
+                                        ids: ids, frames: frames) else { return nil }
+        return candidates[index]
+    }
+
+    /// Geometry is only a fallback for unavailable IDs, never permission to select a different
+    /// known window. Two Chrome windows (normal/private included) can have identical bounds.
+    static func matchingIndex(windowID: CGWindowID, approximateFrame: CGRect,
+                              ids: [CGWindowID?], frames: [CGRect?]) -> Int? {
+        guard windowID != 0, ids.count == frames.count else { return nil }
+        if let exact = ids.firstIndex(where: { $0 == windowID }) { return exact }
+        let matches = ids.indices.filter { index in
+            guard ids[index] == nil, let f = frames[index],
+                  !f.isEmpty, !approximateFrame.isEmpty else { return false }
+            return abs(f.minX - approximateFrame.minX) < 2 && abs(f.minY - approximateFrame.minY) < 2
+                && abs(f.width - approximateFrame.width) < 2 && abs(f.height - approximateFrame.height) < 2
         }
-        // Fallback: closest frame.
-        for element in windows {
-            let candidate = AXWindow(element: element, pid: pid)
-            if let f = candidate.frame,
-               abs(f.minX - approximateFrame.minX) < 2, abs(f.minY - approximateFrame.minY) < 2,
-               abs(f.width - approximateFrame.width) < 2, abs(f.height - approximateFrame.height) < 2 {
-                return candidate
-            }
-        }
-        return nil
+        return matches.count == 1 ? matches[0] : nil
     }
 
     /// The window the app is focused on, or nil if it has none yet (just launched, or a menu-bar app).
@@ -108,7 +117,7 @@ struct AXWindow: @unchecked Sendable {
 
     var windowID: CGWindowID? {
         var id: CGWindowID = 0
-        return _AXUIElementGetWindow(element, &id) == .success ? id : nil
+        return _AXUIElementGetWindow(element, &id) == .success && id != 0 ? id : nil
     }
 
     var frame: CGRect? { Watchdog.during("Accessibility: a window's frame (AXWindow.frame)") { element.frame } }

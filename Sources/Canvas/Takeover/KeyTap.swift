@@ -38,6 +38,8 @@ final class KeyTap: @unchecked Sendable {
         /// Mission Control key with Sunlight off; and a stop and a start in quick succession could
         /// invalidate the new thread's port, after which nothing reinstalled it.
         var enabled = false
+        /// Configured legacy overview keys; refreshed on the main actor, never read defaults on the tap thread.
+        var overviewKeys: Set<Int64> = [99, 160]
         var entered = false
         var switcherOpen = false
         /// ⌘N is the canvas's to handle (`Command.newWindow`): the entered app's ⌘N makes a window and
@@ -47,6 +49,7 @@ final class KeyTap: @unchecked Sendable {
         var inFullScreenSpace = false
         /// When the Mission Control key went down (the event's timestamp, ns), until it's let go.
         var missionControlDownAt: UInt64?
+        var overviewHeldKey: Int64?
         /// Key codes whose keyDown we swallowed; their keyUp is swallowed too so apps never see an orphan.
         var swallowed = Set<Int64>()
     }
@@ -83,15 +86,32 @@ final class KeyTap: @unchecked Sendable {
     /// thread used to ask it on every ⌘ key), so the tap reads this copy, refreshed as layouts change.
     private let layoutData = OSAllocatedUnfairLock<Data?>(initialState: nil)
     private var layoutObserver: NSObjectProtocol?
+    private var bindingsObserver: NSObjectProtocol?
+
+    @MainActor private func refreshOverviewKeys() {
+        let keys = Set(Settings.canvasBindings.triggers(for: .toggleOverview)
+            .filter(\.isLegacyOverviewKey).map { Int64($0.code) })
+        state.withLock { $0.overviewKeys = keys }
+    }
 
     @MainActor
     init(handler: @escaping @MainActor @Sendable (Command) -> Void) {
         self.handler = handler
         refreshLayout()
+        refreshOverviewKeys()
+        bindingsObserver = NotificationCenter.default.addObserver(forName: Settings.canvasBindingsDidChange,
+                                                                  object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshOverviewKeys() }
+        }
         layoutObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshLayout() }
         }
+    }
+
+    deinit {
+        if let layoutObserver { DistributedNotificationCenter.default().removeObserver(layoutObserver) }
+        if let bindingsObserver { NotificationCenter.default.removeObserver(bindingsObserver) }
     }
 
     @MainActor
@@ -106,7 +126,9 @@ final class KeyTap: @unchecked Sendable {
 
     func start() {
         state.withLock {
+            let keys = $0.overviewKeys
             $0 = State()
+            $0.overviewKeys = keys
             $0.enabled = true
         }
         if let runLoop {
@@ -128,7 +150,11 @@ final class KeyTap: @unchecked Sendable {
     /// Off: every key passes, at once, whether or not the tap's thread is up yet. The tap itself is
     /// told to stop listening too, so the keys don't even round-trip through this process meanwhile.
     func stop() {
-        state.withLock { $0 = State() }
+        state.withLock {
+            let keys = $0.overviewKeys
+            $0 = State()
+            $0.overviewKeys = keys
+        }
         guard let runLoop else { return }
         CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) { [self] in
             if let port { CGEvent.tapEnable(tap: port, enable: false) }
@@ -340,10 +366,12 @@ final class KeyTap: @unchecked Sendable {
         case leftArrow, rightArrow, upArrow, downArrow:
             // Spaces switching and Mission Control's ⌃↑ ⌃↓: one Desktop per display, the canvas's.
             return (control && !command && !option) ? .swallow : .pass
-        case missionControlKey where !command && !control && !option:
+        case let code where (code == 99 || code == missionControlKey) && !command && !control && !option && !shift:
+            guard state.overviewKeys.contains(keyCode) else { return .pass }
             // Held, the key repeats: it's still the one press (held to pick a window), not a toggle each time.
             if autorepeat || state.missionControlDownAt != nil { return .swallow }
             state.missionControlDownAt = timestamp
+            state.overviewHeldKey = keyCode
             return .send(.missionControl)
         case f11 where !command && !control && !option:
             return .send(.showDesktop)
@@ -355,8 +383,9 @@ final class KeyTap: @unchecked Sendable {
     /// A key let go: its keyUp is swallowed if its keyDown was. The Mission Control key's says how long it was held.
     static func release(keyCode: Int64, state: inout State, timestamp: UInt64) -> Action {
         let wasSwallowed = state.swallowed.remove(keyCode) != nil
-        if keyCode == missionControlKey, let down = state.missionControlDownAt {
+        if keyCode == state.overviewHeldKey, let down = state.missionControlDownAt {
             state.missionControlDownAt = nil
+            state.overviewHeldKey = nil
             let held = timestamp >= down ? TimeInterval(timestamp - down) / 1_000_000_000 : 0
             return .send(.missionControlUp(held: held))
         }

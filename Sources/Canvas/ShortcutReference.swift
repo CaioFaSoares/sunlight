@@ -11,7 +11,11 @@ enum ShortcutReference {
     }
 
     /// The canvas, in the order you'd learn it.
-    static let canvasRows: [Row] = [
+    static var canvasRows: [Row] {
+        let config = Settings.canvasBindings
+        let toggle = config.triggers(for: .toggleOverview).map(\.label).joined(separator: " · ")
+        let legacyHold = config.triggers(for: .toggleOverview).contains(where: \.isLegacyOverviewKey)
+        return [
         Row(title: "Zoom", keys: "pinch · ⌥ or ⌘ scroll"),
         Row(title: "Pan", keys: "two-finger scroll · four-finger drag"),
         Row(title: "Move a window", keys: "drag"),
@@ -19,12 +23,16 @@ enum ShortcutReference {
         Row(title: "Enter where it is", keys: "click · pinch in"),
         Row(title: "Centre and enter", keys: "double-click · ⏎"),
         Row(title: "Use a window at 1:1", keys: "click"),
-        Row(title: "See everything", keys: "four-finger tap"),
-        Row(title: "Canvas ↔ last window", keys: "Mission Control key · four-finger tap"),
-        Row(title: "Jump to another window", keys: "hold Mission Control key, point, let go"),
+        Row(title: "See everything", keys: Settings.seeAllGesture.title),
+        Row(title: "Canvas ↔ last window", keys: toggle.isEmpty ? "Keyboard/mouse disabled · \(Settings.seeAllGesture.title)" : "\(toggle) · \(Settings.seeAllGesture.title)"),
+        Row(title: "Jump to another window", keys: legacyHold ? "hold F3 / Mission Control key, point, let go" : "double-click a window"),
         Row(title: "Switch apps", keys: "⌘Tab · then ⌘← ⌘→"),
         Row(title: "Switch the app's windows", keys: "⌘Tab, then ⌘` · ⌘↑ ⌘↓"),
-    ]
+        ] + CanvasBindingAction.allCases.filter { $0 != .toggleOverview }.compactMap { action in
+            let keys = config.triggers(for: action).map(\.label).joined(separator: " · ")
+            return keys.isEmpty ? nil : Row(title: action.title, keys: keys)
+        }
+    }
 
     /// Sunlight's own commands, leaving out the experimental ones that are off (`Settings.arranging`,
     /// `Settings.stripModeEnabled`).

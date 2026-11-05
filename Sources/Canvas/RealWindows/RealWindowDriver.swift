@@ -12,8 +12,9 @@ import QuartzCore
 final class RealWindowDriver: @unchecked Sendable {
     private let queue = DispatchQueue(label: "canvas.real-windows", qos: .userInteractive)
     private let lock = NSLock()
-    /// The latest frame, and the shadow request to follow it (`LiveWindowsWire.shadow`), if any.
-    private var pending: (frame: Data, shadow: Data?, full: Bool, at: CFTimeInterval)?
+    /// The latest full checkpoint plus the latest delta, with their shadow requests. A delta must
+    /// never coalesce away a full frame's membership/order/park-wake transition.
+    private var pending = LiveFrameMailbox()
     /// Window alphas still to send (`LiveWindowsWire.alpha`), the latest for each window: merged rather
     /// than replaced with the frame, so a window's last alpha (back to 1) is never lost to a newer frame.
     private var pendingAlpha: [CGWindowID: Float] = [:]
@@ -216,7 +217,7 @@ final class RealWindowDriver: @unchecked Sendable {
     /// frame when the add-on takes them (sunlight-40).
     func submit(_ data: Data, shadow: Data? = nil, full: Bool = true, alphas: [CGWindowID: Float] = [:]) {
         lock.lock()
-        pending = (data, shadow, full, CACurrentMediaTime())
+        pending.submit(.init(frame: data, shadow: shadow, full: full, at: CACurrentMediaTime()))
         pendingAlpha.merge(alphas) { _, new in new }
         if scheduled { lock.unlock(); return }
         scheduled = true
@@ -226,18 +227,23 @@ final class RealWindowDriver: @unchecked Sendable {
             while true {
                 lock.lock()
                 guard epoch == generation else { lock.unlock(); return }
-                guard let next = pending else { scheduled = false; lock.unlock(); return }
-                pending = nil
+                let frames = pending.take()
+                guard !frames.isEmpty else { scheduled = false; lock.unlock(); return }
                 let alphas = pendingAlpha
                 pendingAlpha = [:]
                 lock.unlock()
                 do {
-                    try deliver(next.frame, shadow: next.shadow, alphas: alphas, full: next.full, submitted: next.at, epoch: epoch)
+                    for (index, next) in frames.enumerated() {
+                        guard isCurrent(epoch) else { return }
+                        try deliver(next.frame, shadow: next.shadow,
+                                    alphas: index == frames.count - 1 ? alphas : [:],
+                                    full: next.full, submitted: next.at, epoch: epoch)
+                    }
                 } catch {
                     connection?.close(); connection = nil
                     lock.lock()
                     let current = epoch == generation
-                    if current { pending = nil; scheduled = false }
+                    if current { pending.clear(); scheduled = false }
                     lock.unlock()
                     if current {
                         DispatchQueue.main.async { [weak self] in
@@ -284,7 +290,7 @@ final class RealWindowDriver: @unchecked Sendable {
     func restore(handoff: (CGWindowID, CGPoint)? = nil, overlay: CGWindowID = 0, backdrop: CGWindowID = 0,
                  shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil, above: pid_t = 0,
                  pinned: [CGWindowID] = []) -> Bool {
-        lock.lock(); generation += 1; pending = nil; pendingAlpha = [:]; scheduled = false; lock.unlock()
+        lock.lock(); generation += 1; pending.clear(); pendingAlpha = [:]; scheduled = false; lock.unlock()
         return Watchdog.during("the Dock's answer to a handoff or release (RealWindowDriver.restore)") { queue.sync {
             defer { connection?.close(); connection = nil }
             lastRestoreFailure = nil

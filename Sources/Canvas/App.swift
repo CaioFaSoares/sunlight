@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var canvas: Desk?
     /// The ⌃⌥ placement keys (`TileMenu`): global, so they work in a real window too.
     private var tileHotkeys: [Hotkey] = []
+    private var canvasBindings: CanvasBindingRuntime?
     private var trackpadPan: TrackpadPan?
     private var takeover: TakeoverMode?
     private var signalSources: [DispatchSourceSignal] = []
@@ -165,7 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // status says so; once the canvas has reloaded it, the menu bar shouldn't go on saying setup is unfinished.
         canvas.onLiveWindowsAnswering = { [weak self] in self?.setup?.recheck() }
         menuBar = makeMenuBar(for: canvas)
-        if Settings.sunlightOn { installHotkeys(for: canvas) }
+        let bindings = CanvasBindingRuntime { [weak canvas] action in canvas?.performBinding(action) }
+        canvasBindings = bindings
+        if Settings.sunlightOn {
+            installHotkeys(for: canvas)
+            bindings.start()
+        }
         NotificationCenter.default.addObserver(forName: Settings.experimentalFeaturesDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.experimentalFeaturesChanged() }
         }
@@ -345,10 +351,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Settings.sunlightOn = on
         trackpadPan?.setActive(on)
         if on {
+            canvasBindings?.start()
             if let canvas, tileHotkeys.isEmpty { installHotkeys(for: canvas) }
             takeover?.resumeInput()
             canvas?.setPaused(false)
         } else {
+            canvasBindings?.stop()
             tileHotkeys = []
             takeover?.suspendInput()
             canvas?.setPaused(true)

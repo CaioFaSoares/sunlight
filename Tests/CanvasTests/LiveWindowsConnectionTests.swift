@@ -198,6 +198,7 @@ final class LiveWindowsConnectionTests: XCTestCase {
     /// closing it, or `restore`). `version` nil: nothing answers the version request (a stock yabai
     /// would close).
     private func leaseSeen(by version: String?, shadowStatus: UInt8 = 0,
+                           onRequest: ((Data) -> Void)? = nil,
                            exercise: (RealWindowDriver, _ awaitFramed: () -> Void) throws -> Void) throws -> [Data] {
         let path = "/tmp/sunbeam-test-\(UUID().uuidString).sock"
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -244,6 +245,7 @@ final class LiveWindowsConnectionTests: XCTestCase {
                         var b = [UInt8](repeating: 0, count: Int(h[0]) | Int(h[1]) << 8)
                         guard recv(client, &b, b.count, MSG_WAITALL) == b.count else { break }
                         requests.value.append(Data(h + b))
+                        onRequest?(Data(h + b))
                         var status: UInt8 = b[0] == LiveWindowsWire.shadow ? shadowStatus : 0
                         _ = Darwin.send(client, &status, 1, 0)
                         // The first frame (or handoff), not a shadow: a test that eases shadows first then
@@ -308,6 +310,33 @@ final class LiveWindowsConnectionTests: XCTestCase {
             if !restored.value { XCTAssertNotNil(driver.lastRestoreFailure) }
         }
         return (requests, restored.value, kept.value)
+    }
+
+    func testBusyDockReceivesFullCheckpointBeforeLatestPartial() throws {
+        let initial = try LiveWindowsWire.snapshot([], backdrop: 0, overlay: 0, kind: .full)
+        let checkpoint = try LiveWindowsWire.snapshot([], backdrop: 0, overlay: 17, kind: .full)
+        let delta = try LiveWindowsWire.snapshot([], backdrop: 0, overlay: 17, kind: .partial)
+        let blocked = expectation(description: "Dock is busy with the initial frame")
+        let latestSeen = expectation(description: "latest partial reached the Dock")
+        let release = DispatchSemaphore(value: 0)
+        let didBlock = Box(false)
+        let requests = try leaseSeen(by: "sunlight-57", onRequest: { data in
+            if data == initial, !didBlock.value {
+                didBlock.value = true
+                blocked.fulfill()
+                XCTAssertEqual(release.wait(timeout: .now() + 3), .success)
+            }
+            if data == delta { latestSeen.fulfill() }
+        }) { driver, _ in
+            driver.submit(initial)
+            wait(for: [blocked], timeout: 3)
+            driver.submit(checkpoint)
+            driver.submit(delta, full: false)
+            release.signal()
+            wait(for: [latestSeen], timeout: 3)
+            XCTAssertTrue(driver.restore())
+        }
+        XCTAssertEqual(Array(requests.prefix(3)), [initial, checkpoint, delta])
     }
 
     func testHandoffKeepsTheWindowsInViewWithAnAddOnThatCan() throws {

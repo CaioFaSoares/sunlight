@@ -94,11 +94,10 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         configured = wanted
         let stream = SCStream(filter: filter, configuration: configuration(configured), delegate: self)
-        let title = window.title ?? "?"
         do {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: WindowCapture.sampleQueue)
         } catch {
-            NSLog("Capture: addStreamOutput failed for \(title): \(error)")
+            NSLog("Capture: addStreamOutput failed (code \((error as NSError).code))")
             onEnd(error)
             return
         }
@@ -114,14 +113,14 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                         self.stream = nil
                         // Stopped meanwhile: nobody is listening, and the owner may have a newer stream.
                         guard !self.stopWanted else { return }
-                        NSLog("Capture: start failed for \(title): \(error)")
+                        NSLog("Capture: start failed (code \((error as NSError).code))")
                         self.onEnd(error)
                         return
                     }
                     self.started = true
                     // Stopped while it was starting: stop it now that it can be stopped.
                     if self.stopWanted {
-                        NSLog("Capture: stopping a stream that was still starting for \(title)")
+                        NSLog("Capture: stopping a stream that was still starting")
                         self.stopNow()
                         return
                     }
@@ -143,10 +142,9 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private func stopNow() {
         guard let stream else { return }
         self.stream = nil
-        let title = window.title ?? "?"
         stream.stopCapture { error in
             // A stop that fails leaves the stream running with its pill on the window; say so.
-            if let error { NSLog("Capture: stop failed for \(title): \(error)") }
+            if let error { NSLog("Capture: stop failed (code \((error as NSError).code))") }
         }
     }
 
@@ -186,7 +184,7 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 MainActor.assumeIsolated {
                     guard let self, self.isCurrent(id) else { return }
                     self.reconfiguring = false
-                    if let error { NSLog("Capture: updateConfiguration failed: \(error)") }
+                    if let error { NSLog("Capture: updateConfiguration failed (code \((error as NSError).code))") }
                     if self.wantsReconfigure { self.reconfigureIfNeeded() }
                 }
             }
@@ -253,7 +251,7 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard self.isCurrent(id) else { return }   // an earlier stream of ours, already replaced
                 self.stream = nil
                 guard !self.stopWanted else { return }   // ours to stop; nobody is listening any more
-                NSLog("Capture: stream stopped for \(self.window.title ?? "?"): \(error)")
+                NSLog("Capture: stream stopped (code \((error as NSError).code))")
                 self.onEnd(error)
             }
         }

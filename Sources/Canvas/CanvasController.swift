@@ -1518,6 +1518,21 @@ final class CanvasController {
         }
     }
 
+    /// A configured zoom binding, anchored under the pointer (or at this display's centre).
+    func zoomCanvas(by factor: CGFloat) {
+        guard addingWidgets == nil, !isSetupShowing, !paused, switcher == nil else { return }
+        guard NSApp.isActive, activeProxy == nil else {
+            pendingPlacement = { [weak self] in self?.zoomCanvas(by: factor) }
+            show()
+            return
+        }
+        let pointer = CGEvent(source: nil)?.location
+        let point: CGPoint
+        if let pointer, display.frame.contains(pointer) { point = toView(pointer) }
+        else { point = CGPoint(x: view.bounds.midX, y: view.bounds.midY) }
+        view.zoom(by: factor, around: point)
+    }
+
     /// A four-finger drag pans the canvas from wherever the user is. From a window (or any other app)
     /// the canvas comes to the front first, as with the Mission Control key, and the travel waits for it to arrive. A
     /// four-finger tap (or, by Settings › How to use, a quick flick up) is the Mission Control key: from a
@@ -2043,11 +2058,11 @@ final class CanvasController {
     private var diffScheduled = false
     private var diffTimer: Timer?
     private var heartbeatTimer: Timer?
-    /// What the last listing wanted on the canvas; a full sync creates only within it.
+    /// What the last listing wanted on the canvas; capture-handle retries stay within it.
     private var lastWantedIDs: Set<CGWindowID> = []
-    /// Windows the list shows but ScreenCaptureKit doesn't return, with how often it was asked: a
-    /// few tries, then they're left alone until they go away (or the heartbeat asks again).
-    private var unstreamable: [CGWindowID: Int] = [:]
+    /// Missing capture handles are retried with bounded backoff, independently of window tracking.
+    /// A protected or temporarily omitted window still has a metadata-only proxy.
+    private var unstreamable: [CGWindowID: WindowDiscovery.HandleRetry] = [:]
     private var fullSyncRequested: Set<CGWindowID> = []
     private var fullSyncPending = false
     private var bundleIDs: [pid_t: String] = [:]
@@ -2185,9 +2200,11 @@ final class CanvasController {
                      visibleWorld: view.camera.toWorld(CGRect(origin: .zero, size: view.bounds.size)),
                      zoom: view.camera.zoom)
         let wanted = list.filter {
-            if renderer == .realWindows, let p = proxies[$0.id], p.pid == $0.pid { return true }
-            // Each window is on one display's canvas (`Desk.owner`).
-            return (isCanvasMaterial($0) || isWidget($0)) && (desk?.canvas(forWindow: $0.id, frame: $0.bounds) ?? self) === self
+            let existingReal = renderer == .realWindows && proxies[$0.id]?.pid == $0.pid
+            guard existingReal || isCanvasMaterial($0) || isWidget($0) else { return false }
+            // Ownership applies even to an existing transformed proxy. Keeping the shortcut first
+            // lets a stale source canvas reclaim a window after it moved to another display.
+            return (desk?.canvas(forWindow: $0.id, frame: $0.bounds) ?? self) === self
         }
         let wantedIDs = Set(wanted.map(\.id))
         lastWantedIDs = wantedIDs
@@ -2264,18 +2281,20 @@ final class CanvasController {
             for p in proxies.values where p.owner == .user { p.owner = .canvas }
         }
 
-        let new = wantedIDs.subtracting(proxies.keys).subtracting(unstreamable.keys)
+        let new = wantedIDs.subtracting(proxies.keys)
         if gone > 0 || !moved.isEmpty || !new.isEmpty {
             NSLog("Sync: \(list.count) on screen, \(wanted.count) wanted, +\(new.count) −\(gone), \(moved.count) moved\(moved.isEmpty ? "" : " (\(moved.joined(separator: "; ")))")\(new.isEmpty || renderer == .realWindows ? "" : " → asking ScreenCaptureKit")")
         }
-        if renderer == .realWindows {
+        // WindowList is the discovery authority in both renderers. SCK may lag creation or omit
+        // protected windows; neither should disappear from tracking or require an AX title.
+        do {
             var created: [WindowProxy] = []
             let arriving = didInitialFit   // the launch sync's windows are simply there; later ones pop in
             for w in wanted.reversed() where proxies[w.id] == nil {
                 let widget = isWidget(w)
                 let p = register(WindowProxy(info: w, kind: widget ? .widget : .window,
                                              camera: widget ? Camera() : globalCamera, scale: scale))
-                p.usesRealWindow = p.kind == .window
+                p.usesRealWindow = renderer == .realWindows && p.kind == .window
                 proxies[w.id] = p
                 view.add(p, arriving: arriving)
                 if p.kind == .widget { resolveWidget(p) }
@@ -2310,12 +2329,15 @@ final class CanvasController {
                     NSLog("Sync: window \(p.windowID) (\(p.appName)) taken without an announcement")
                 }
             }
-            if arriving, created.contains(where: { $0.kind == .window }) { updateRealWindows() }
-        } else if !new.isEmpty {
-            requestFullSync(for: new)
-        } else if pendingFitAll, !proxies.isEmpty {
-            pendingFitAll = false
-            view.fitAll(animated: true)
+            if renderer == .realWindows, arriving, created.contains(where: { $0.kind == .window }) { updateRealWindows() }
+        }
+        if renderer == .capture {
+            let needsHandle = Set(wanted.compactMap { w -> CGWindowID? in
+                guard proxies[w.id]?.window == nil,
+                      unstreamable[w.id]?.isDue(at: now) ?? true else { return nil }
+                return w.id
+            })
+            if !needsHandle.isEmpty { requestFullSync(for: needsHandle) }
         }
         layoutStripWhenIdle()
         runPendingPlacement()
@@ -2373,8 +2395,8 @@ final class CanvasController {
         }
     }
 
-    /// The heavyweight enumeration, for the proxies the listing asked for. It never removes or moves
-    /// anything (the window list does that), only creates, and freshens the handles of the rest.
+    /// The heavyweight enumeration only attaches/freshens permitted capture handles. Discovery,
+    /// creation, placement and removal belong exclusively to the window-server reconciliation.
     func syncShareableContent() async {
         guard renderer == .capture, !configuringRenderer else { return }
         let revision = rendererRevision
@@ -2384,7 +2406,11 @@ final class CanvasController {
         }
         syncing = true
         defer { syncing = false }
-        let requested = fullSyncRequested
+        // A listing can enqueue the same ID while an enumeration is in flight. Recheck the
+        // deadline after coalescing so stale queued requests cannot consume the backoff at once.
+        let requested = Set(fullSyncRequested.filter {
+            lastWantedIDs.contains($0) && (unstreamable[$0]?.isDue(at: CACurrentMediaTime()) ?? true)
+        })
         fullSyncRequested = []
 
         let content: SCShareableContent
@@ -2393,8 +2419,13 @@ final class CanvasController {
             // listing keeps, and nothing here needs it.
             content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         } catch {
-            NSLog("Sync: shareable content failed — Screen Recording permission? (\(error))")
-            fullSyncRequested.formUnion(requested)
+            NSLog("Sync: shareable content failed — Screen Recording permission? (code \((error as NSError).code))")
+            let now = CACurrentMediaTime()
+            for id in requested.intersection(lastWantedIDs) {
+                unstreamable[id, default: WindowDiscovery.HandleRetry()].missed(at: now)
+            }
+            // The next due window-list pass retries; permission failures must not spin or drop
+            // metadata proxies either. Do not log the NSError userInfo (it can contain titles).
             return
         }
         guard revision == rendererRevision, renderer == .capture, !handingOff, addingWidgets == nil else {
@@ -2403,73 +2434,33 @@ final class CanvasController {
             return
         }
 
-        // SCShareableContent lists windows front to back; walk it backwards so new proxies stack correctly.
-        // Widgets are at the very back, so they start out under every window, as on the desktop.
         var found = Set<CGWindowID>()
-        var created = 0
-        var createdProxies: [WindowProxy] = []
-        let arriving = didInitialFit   // the launch sync's windows are simply there; later ones pop in
-        for w in content.windows.reversed() {
-            guard let app = w.owningApplication, app.processID != myPID else { continue }
-            if let p = proxies[w.windowID] {
-                p.window = w   // a fresh handle; its frame and title are the listing's business
-                found.insert(w.windowID)
-                continue
-            }
-            // Only what the listing wants right now: a window that closed meanwhile is skipped.
-            guard requested.contains(w.windowID), lastWantedIDs.contains(w.windowID),
-                  isCanvasMaterial(w) || Widgets.isWidget(w) else { continue }
-            let p = makeProxy(for: w, camera: globalCamera)
-            proxies[w.windowID] = p
-            view.add(p, arriving: arriving)
-            // A window that just appeared may not repaint for a long while, and its stream delivers
-            // nothing until it does: a one-shot gives the arrival something to show right away.
-            if arriving { p.refresh() }
+        for w in content.windows {
+            guard let app = w.owningApplication, app.processID != myPID,
+                  let p = proxies[w.windowID], p.pid == app.processID,
+                  (desk?.canvas(forWindow: p.windowID, frame: p.lastRealFrame) ?? self) === self else { continue }
+            let firstHandle = p.window == nil
+            p.window = w   // frames and titles remain the window list's business
+            unstreamable[w.windowID] = nil
+            // One permitted frame gives a newly discovered metadata proxy something to show.
+            if firstHandle { p.refresh() }
             found.insert(w.windowID)
-            created += 1
-            createdProxies.append(p)
         }
-        let missing = requested.subtracting(found)
-        for id in missing { unstreamable[id, default: 0] += 1 }
-        let retry = missing.filter { unstreamable[$0, default: 0] < 3 }
-        if created > 0 || !missing.isEmpty {
-            NSLog("Sync: ScreenCaptureKit lists \(content.windows.count), created \(created), missing \(missing.count)\(retry.isEmpty ? "" : ", asking again")")
+        let missing = requested.subtracting(found).intersection(lastWantedIDs)
+        let now = CACurrentMediaTime()
+        for id in missing { unstreamable[id, default: WindowDiscovery.HandleRetry()].missed(at: now) }
+        if !missing.isEmpty {
+            NSLog("Sync: ScreenCaptureKit lists \(content.windows.count), missing \(missing.count) capture handles")
         }
-        // ScreenCaptureKit lags window creation by a beat: ask again shortly, a few times, then let it be.
-        if !retry.isEmpty { requestFullSync(for: retry, after: 0.5) }
+        // Retry through reconciliation, not requestFullSync while `syncing` (which coalesces away
+        // its delay). Metadata proxies survive indefinitely even when capture is disallowed.
+        if let next = missing.compactMap({ unstreamable[$0]?.nextAttempt }).min() {
+            scheduleDiff(after: max(0.05, next - now))
+        }
         compareSourcesOnce(content)
-        // Sheets and prompts hang from their windows here too (the launch sync, and capture mode);
-        // an attached window has no place of its own to remember or find. Child and parent are both
-        // read from the window server, as everywhere else: ScreenCaptureKit's frames at launch put the
-        // prompt at its window's corner for a moment.
-        if createdProxies.contains(where: { $0.kind == .window }) { attachNewWindows(createdProxies, in: snapshot()) }
-        let free = createdProxies.filter { $0.attachedTo == nil }
-        if arriving { for p in createdProxies where p.attachedTo != nil { view.setArrival(of: p, context: WindowEffect.Context(attached: true)) } }
-        let placed = placeRemembered(free)
-        if createdProxies.contains(where: { $0.kind == .widget }) { arrangeDesktop(animated: false) }
-        noteStripArrivals(free, arriving: arriving)
-        if arriving, !NSApp.isActive || activeProxy != nil { noteArrived(free) }
-        placeNewWindows(free, arriving: arriving)
-        if created > 0 { layoutStripWhenIdle() }
-        if !didInitialFit, !proxies.isEmpty {
-            didInitialFit = true
-            if placed, let camera = remembered?.camera(for: display.uuid, lead: isLead, viewSize: view.bounds.size) {
-                // The canvas as it was last run, seen as it was.
-                view.animateCamera(to: camera)
-            } else {
-                // First sync: the canvas is the desktop at 1:1. Pull back a little so it reads as a canvas.
-                view.fitAll(animated: true)
-            }
-            onFirstSync?()
-        } else if pendingFitAll, !proxies.isEmpty {
-            pendingFitAll = false
-            view.fitAll(animated: true)
-        }
-        runPendingPlacement()
-        // Streams are the capture pass's call: what's in view, at what detail, and whose windows are
-        // in front. After the fit, so the first pass already sees where the camera is going.
+        // Reconciliation already created, attached and placed these windows. An old SCK reply
+        // must not recreate a proxy transferred to another display while this request was in flight.
         scheduleCapturePass()
-        remember()
         if fullSyncPending {
             fullSyncPending = false
             // On the next turn, once `syncing` is cleared (the defer): asked for now, the request would
@@ -2514,9 +2505,8 @@ final class CanvasController {
     /// desktop as far as the eye is concerned; another Canvas's full-screen window would cover the
     /// canvas with itself. The Mac's own interface isn't a window to put on the canvas (`SystemUI`).
     private func isCanvasMaterial(_ w: WindowInfo) -> Bool {
-        guard w.layer == 0, w.alpha > 0, w.bounds.width >= 120, w.bounds.height >= 80, w.pid != myPID else { return false }
-        let b = bundleID(of: w.pid)
-        return b != Bundle.main.bundleIdentifier && !SystemUI.owns(b)
+        WindowDiscovery.isApplicationWindow(w, ownPID: myPID, bundleID: bundleID(of: w.pid),
+                                            ownBundleID: Bundle.main.bundleIdentifier)
     }
 
     private func isWidget(_ w: WindowInfo) -> Bool {
@@ -2591,7 +2581,7 @@ final class CanvasController {
         parent.attachedChildren.append(child)
         if view.isClosing(parent) { view.cancelExit(parent) }   // "save changes?": the app kept it
         view.bringToFront(parent)   // the child above it
-        NSLog("Attached: \(child.appName) — \(child.title) hangs from \(parent.title) at offset (\(Int(child.attachmentOffset.x)), \(Int(child.attachmentOffset.y)))")
+        NSLog("Attached: discovered window attached to its parent")
     }
 
     /// Among windows that just showed up, the ones that hang from a window of their app (`attachmentParent`),
@@ -2640,7 +2630,7 @@ final class CanvasController {
             if let parent = attachmentParent(for: native, pid: c.pid, excluding: c.windowID) {
                 attach(c, to: parent, native: native)
             } else {
-                NSLog("Attached: \(c.appName) — \(c.title) stands alone now that \(p.title) is gone")
+                NSLog("Attached: discovered window detached after its parent left")
             }
         }
     }
@@ -5765,7 +5755,7 @@ final class CanvasController {
             return v.isNull ? 0 : v.width * v.height
         }
         let candidates = view.proxies.compactMap { p -> (id: ObjectIdentifier, area: CGFloat, streaming: Bool, capped: Bool)? in
-            guard p.kind == .window, !p.inFront else { return nil }
+            guard p.kind == .window, p.window != nil, !p.inFront else { return nil }
             if case .far = p.viewport { return nil }
             let area = max(onScreen(camera.toScreen(p.worldRect)), target.map { onScreen($0.toScreen(p.worldRect)) } ?? 0)
             return (ObjectIdentifier(p), area, p.isStreaming, p.capped)
@@ -5776,6 +5766,9 @@ final class CanvasController {
 
         var streaming = 0, far = 0, front = 0, capped = 0
         for p in view.proxies {
+            // A metadata-only proxy cannot capture. Its discovery retry schedules the next lookup;
+            // waking at retryAfter == 0 here would otherwise spin the capture pass at 100 Hz.
+            guard p.window != nil else { p.stopCapture(); p.capped = false; continue }
             if p.inFront {
                 p.capped = false
                 p.stopCapture()
@@ -7714,6 +7707,11 @@ final class CanvasController {
 
     /// The window went to another display's canvas (`Desk.move`): its proxy leaves this one.
     func letGo(of id: CGWindowID) {
+        guard proxies[id] != nil || away[id] != nil else { return }
+        // End the old canvas's lease BEFORE the destination can acquire the window. Otherwise a
+        // queued full frame (or the old lease's eventual release) can restore its transform/level
+        // behind the destination's backdrop, leaving it invisible after a display round trip.
+        if realWindowsPresented { suspendRealWindows(keepingLook: true) }
         guard let p = proxies.removeValue(forKey: id) ?? away.removeValue(forKey: id) else { return }
         p.stopCapture()
         view.remove(p)
@@ -7723,6 +7721,8 @@ final class CanvasController {
         if activeProxy === p { leaveEntered(reconcile: false) }
         showAway()
         minimap.redraw()
+        // Resume this canvas with a fresh full snapshot containing only the windows it still owns.
+        scheduleDiff()
     }
 
     /// The display changed under the canvas (moved in the arrangement, a new resolution, the menu bar's

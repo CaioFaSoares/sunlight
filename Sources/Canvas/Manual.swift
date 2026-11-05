@@ -53,8 +53,8 @@ enum Manual {
         Row(title: "Go into a window", how: "click · pinch in over it"),
         Row(title: "Bring a window to the middle", how: "double-click · ⏎ over it"),
         Row(title: "Use a window at 1:1", how: "click, as on the desktop"),
-        Row(title: "Canvas ↔ last window", how: "Mission Control key · four-finger tap"),
-        Row(title: "Jump to another window", how: "hold the Mission Control key, point at it, let go"),
+        Row(title: "Canvas ↔ last window", how: "configured key or mouse button (Settings › Keys & Mouse) · four-finger gesture"),
+        Row(title: "Jump to another window", how: "with default keys: hold F3 / Mission Control, point at it, let go"),
         Row(title: "Show Desktop", how: "F11 · four-finger spread"),
         Row(title: "Pan from anywhere, even inside a window", how: "four-finger drag, any direction"),
     ]

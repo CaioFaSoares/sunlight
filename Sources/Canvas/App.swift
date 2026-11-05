@@ -68,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var canvas: Desk?
     /// The ⌃⌥ placement keys (`TileMenu`): global, so they work in a real window too.
     private var tileHotkeys: [Hotkey] = []
+    private var canvasBindings: CanvasBindingRuntime?
     private var trackpadPan: TrackpadPan?
     private var takeover: TakeoverMode?
     private var signalSources: [DispatchSourceSignal] = []
@@ -148,7 +149,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // A display more or fewer: ⌃⌥⇧ → ← are Sunlight's only while there's somewhere to move to.
         canvas.onDisplaysChanged = { [weak self] in self?.experimentalFeaturesChanged() }
         menuBar = makeMenuBar(for: canvas)
-        if Settings.sunlightOn { installHotkeys(for: canvas) }
+        let bindings = CanvasBindingRuntime { [weak canvas] action in canvas?.performBinding(action) }
+        canvasBindings = bindings
+        if Settings.sunlightOn {
+            installHotkeys(for: canvas)
+            bindings.start()
+        }
         NotificationCenter.default.addObserver(forName: Settings.experimentalFeaturesDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.experimentalFeaturesChanged() }
         }
@@ -320,10 +326,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Settings.sunlightOn = on
         trackpadPan?.setActive(on)
         if on {
+            canvasBindings?.start()
             if let canvas, tileHotkeys.isEmpty { installHotkeys(for: canvas) }
             takeover?.resumeInput()
             canvas?.setPaused(false)
         } else {
+            canvasBindings?.stop()
             tileHotkeys = []
             takeover?.suspendInput()
             canvas?.setPaused(true)

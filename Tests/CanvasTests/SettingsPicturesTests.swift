@@ -111,6 +111,8 @@ final class SettingsPicturesTests: XCTestCase {
         XCTAssertEqual(Tab(remembered: "trackpad"), .howToUse)
         XCTAssertEqual(Tab(remembered: "motion"), .motion)
         XCTAssertNil(Tab(remembered: "rendering"))
-        XCTAssertEqual(Tab.allCases.count, 8)
+        XCTAssertEqual(Tab(remembered: "input"), .input)
+        XCTAssertEqual(Tab.input.title, "Keys & Mouse")
+        XCTAssertEqual(Tab.allCases.count, 9)
     }
 }

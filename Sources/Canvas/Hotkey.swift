@@ -4,23 +4,34 @@ import Foundation
 /// A global hotkey via Carbon's RegisterEventHotKey. Works without Accessibility permission
 /// and fires even while another app is frontmost — that's what makes "come back to the canvas" possible.
 final class Hotkey {
-    private static var registry: [UInt32: Hotkey] = [:]
+    // Registration must not retain its owner: otherwise clearing a runtime's hotkeys never unregisters them.
+    private final class WeakHotkey {
+        weak var value: Hotkey?
+        init(_ value: Hotkey) { self.value = value }
+    }
+    private static var registry: [UInt32: WeakHotkey] = [:]
     private static var nextID: UInt32 = 1
     private static var handlerInstalled = false
 
     private let id: UInt32
     private let callback: @MainActor () -> Void
+    private let repeats: Bool
+    private var pressed = false
     private var ref: EventHotKeyRef?
+    private(set) var registrationStatus: OSStatus = noErr
+    var isRegistered: Bool { registrationStatus == noErr && ref != nil }
 
-    init(keyCode: UInt32, modifiers: UInt32, callback: @escaping @MainActor () -> Void) {
+    init(keyCode: UInt32, modifiers: UInt32, repeats: Bool = true, callback: @escaping @MainActor () -> Void) {
         self.callback = callback
+        self.repeats = repeats
         id = Hotkey.nextID
         Hotkey.nextID += 1
-        Hotkey.registry[id] = self
+        Hotkey.registry[id] = WeakHotkey(self)
         Hotkey.installHandlerIfNeeded()
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x4341_4E56) /* 'CANV' */, id: id)
         let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        registrationStatus = status
         if status != noErr { NSLog("Hotkey: RegisterEventHotKey failed (\(status))") }
     }
 
@@ -32,7 +43,10 @@ final class Hotkey {
     private static func installHandlerIfNeeded() {
         guard !handlerInstalled else { return }
         handlerInstalled = true
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
+        ]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
             var hotKeyID = EventHotKeyID()
             GetEventParameter(event,
@@ -42,11 +56,16 @@ final class Hotkey {
                               MemoryLayout<EventHotKeyID>.size,
                               nil,
                               &hotKeyID)
-            if let hotkey = Hotkey.registry[hotKeyID.id] {
-                let cb = hotkey.callback
-                Task { @MainActor in cb() }
+            if let hotkey = Hotkey.registry[hotKeyID.id]?.value {
+                if GetEventKind(event) == UInt32(kEventHotKeyReleased) {
+                    hotkey.pressed = false
+                } else if hotkey.repeats || !hotkey.pressed {
+                    hotkey.pressed = true
+                    let cb = hotkey.callback
+                    Task { @MainActor in cb() }
+                }
             }
             return noErr
-        }, 1, &spec, nil, nil)
+        }, specs.count, &specs, nil, nil)
     }
 }

@@ -25,28 +25,29 @@ enum WindowList {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
-        return list.compactMap { d in
-            guard let id = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-                  let pid = (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  let layer = (d[kCGWindowLayer as String] as? NSNumber)?.intValue,
-                  let b = d[kCGWindowBounds as String],
-                  let bounds = CGRect(dictionaryRepresentation: b as! CFDictionary) else { return nil }
-            return WindowInfo(id: id, pid: pid, layer: layer, bounds: bounds,
-                              title: d[kCGWindowName as String] as? String,
-                              alpha: (d[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
-        }
+        return list.compactMap(info)
+    }
+
+    /// Missing/redacted titles are valid. Malformed bounds must skip an entry, not crash discovery
+    /// for every other application. Shared by full listings and per-window arrival checks.
+    nonisolated static func info(_ d: [String: Any]) -> WindowInfo? {
+        guard let id = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value, id != 0,
+              let pid = (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, pid > 0,
+              let layer = (d[kCGWindowLayer as String] as? NSNumber)?.intValue,
+              let b = d[kCGWindowBounds as String] as? [String: Any],
+              let bounds = CGRect(dictionaryRepresentation: b as CFDictionary),
+              bounds.minX.isFinite, bounds.minY.isFinite, bounds.width.isFinite, bounds.height.isFinite else { return nil }
+        return WindowInfo(id: id, pid: pid, layer: layer, bounds: bounds,
+                          title: d[kCGWindowName as String] as? String,
+                          alpha: (d[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
     }
 
     /// One window, if it's on screen: for watching for a single window without listing them all.
     nonisolated static func onScreen(_ id: CGWindowID) -> WindowInfo? {
         guard id != 0, let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
               let d = list.first, (d[kCGWindowIsOnscreen as String] as? Bool) == true,
-              let pid = (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-              let layer = (d[kCGWindowLayer as String] as? NSNumber)?.intValue,
-              let b = d[kCGWindowBounds as String],
-              let bounds = CGRect(dictionaryRepresentation: b as! CFDictionary) else { return nil }
-        return WindowInfo(id: id, pid: pid, layer: layer, bounds: bounds, title: d[kCGWindowName as String] as? String,
-                          alpha: (d[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
+              let window = info(d), window.id == id else { return nil }
+        return window
     }
 
     /// Whether a window still exists: on any Space, minimized or not. A fraction of a millisecond,

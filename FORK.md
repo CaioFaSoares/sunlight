@@ -38,7 +38,9 @@ A display ownership transfer synchronously releases the source canvas's live lea
 When an app opens a window while the canvas is away, the add-on may lift it to the front level so the
 app is usable. On return, those windows are now lowered together before the listing runs; otherwise the
 listing rejects anything above the normal level and the window stays above every canvas, untracked.
-The lift/lower bookkeeping is per canvas and is only undone when no canvas is in an entered window.
+The lift/lower bookkeeping is per canvas; on return the tracked windows are lowered, and the actual
+listing is swept for any remaining front-level window (one lifted before this build, or whose
+bookkeeping was lost) before reconciliation. Nothing is lowered while a canvas is in an entered window.
 
 A new window is also claimed by the canvas the user is looking at when it is announced, even if the app
 put it on another display; existing windows keep their display. It is then placed by the existing

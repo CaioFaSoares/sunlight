@@ -41,7 +41,14 @@ final class Desk {
         for (i, d) in displays.enumerated() { add(d, lead: i == 0) }
         Log.note("Displays: \(displays.map { "\($0.name) \(Int($0.frame.width))×\(Int($0.frame.height)) at \(Int($0.frame.minX)),\(Int($0.frame.minY))" }.joined(separator: "; "))")
 
-        WindowServerEvents.onWindowCreated = { [weak self] id in self?.canvases.forEach { $0.windowServerCreated(id) } }
+        WindowServerEvents.onWindowCreated = { [weak self] id in
+            guard let self else { return }
+            // A window the user has just opened belongs to the canvas they are looking at, even if the
+            // app put it on another display: the listing then places it in view instead of leaving it
+            // over there, untransformed, until the canvas changes. Existing windows keep their owner.
+            if id != 0, self.owner[id] == nil { self.owner[id] = self.current.display.uuid }
+            self.canvases.forEach { $0.windowServerCreated(id) }
+        }
         WindowServerEvents.onWindowRemoved = { [weak self] _ in self?.canvases.forEach { $0.windowServerRemoved() } }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in

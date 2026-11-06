@@ -18,7 +18,10 @@ if [[ -z "${SIGN:-}" ]]; then
   SIGN="${SIGN:--}"
 fi
 APP=build/Sunlight.app
-VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)
+# Info.plist is upstream's, unchanged, so a rebase never fights the fork's version. The built app gets
+# <upstream version>-caio.<FORK_REVISION>, with a build number derived from upstream's and the revision.
+VERSION=$(scripts/fork-version.sh version)
+BUILD=$(scripts/fork-version.sh build)
 BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' Info.plist)
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 if [[ -n "$NOTARY_PROFILE" && "$SIGN" != "Developer ID Application: "* ]]; then
@@ -45,6 +48,9 @@ SDK_VERSION=$(xcrun --sdk macosx --show-sdk-version)
 MIN_VERSION=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" Info.plist)
 vtool -set-build-version macos "$MIN_VERSION" "$SDK_VERSION" -replace -output "$APP/Contents/MacOS/Sunlight" "$APP/Contents/MacOS/Sunlight"
 cp Info.plist "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :SunlightForkBuild string caio.$(scripts/fork-version.sh revision)" "$APP/Contents/Info.plist"
 # The icon: compiled from Resources/Sunlight.icon when Xcode is installed, so macOS 26 and later get the
 # Liquid Glass icon in every appearance from Assets.car (Info.plist's CFBundleIconName); otherwise just the
 # checked-in Resources/Sunlight.icns, which macOS 15 uses either way (CFBundleIconFile).
@@ -89,7 +95,7 @@ else
 fi
 codesign "${SIGN_FLAGS[@]}" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --strict --deep "$APP"
-echo "Built $APP ($VERSION, $BUNDLE_ID, signed ${SIGN/#-/ad-hoc})"
+echo "Built $APP ($VERSION build $BUILD, $BUNDLE_ID, signed ${SIGN/#-/ad-hoc})"
 
 # Submits a file to Apple's notary service, waits for the verdict, and staples the ticket to $2.
 notarize() {

@@ -5545,8 +5545,10 @@ final class CanvasController {
         beginPendingPip(leaving: wasIn)
         leaveEntered(reconcile: true)
         // A window lifted while the app was in front is above the canvas; back here it has to be
-        // ordinary again before the listing can take it in.
+        // ordinary again before the listing can take it in. The tracked set misses a lift made before
+        // this build, or one whose bookkeeping was lost, so the actual listing is swept too.
         lowerLiftedWindows()
+        lowerFrontLevelStrays(in: WindowList.onScreen())
         applyPendingPip()
         desktopFloor.noteReturn()
         // Strip mode: the window you were in, and its app's column, go to the left end of the strip. The

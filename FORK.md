@@ -2,7 +2,18 @@
 
 Fork: https://github.com/CaioFaSoares/sunlight. Issues and changes belong here, not upstream.
 
-## Local build 0.2.3 (caio.1, build 10)
+This is a patch set on top of upstream `main`, not a release frozen on one upstream version. The source
+`Info.plist` stays exactly as upstream ships it; the built app is stamped
+`<upstream>-caio.<FORK_REVISION>` with a build number derived from upstream's plus the revision.
+
+## Tracking upstream
+
+`scripts/sync-upstream.sh` fetches `spacefarm-digital/sunlight`, rebases this patch set onto its `main`,
+bumps `FORK_REVISION` when the base release changed, and optionally runs the tests. Resolve conflicts by
+hand; never push to the upstream remote. `scripts/fork-version.sh` prints the derived version/build, and
+`scripts/package.sh` stamps only the built app.
+
+## Feature set
 
 ### #1 — Window discovery, including new private-browser windows
 
@@ -21,6 +32,19 @@ Global mouse bindings need Accessibility. Registration conflicts and missing per
 The live renderer retains the newest complete snapshot even when newer partial camera frames arrive while the Dock is busy. A partial frame cannot replace a pending membership/order/park-wake checkpoint. At most two frames are retained.
 
 A display ownership transfer synchronously releases the source canvas's live lease before the destination can acquire the window, then rebuilds the source frame. Discovery and delayed capture-handle attachment respect current display ownership, so a stale response cannot recreate a proxy on the old display.
+
+### #4 — New windows enter the canvas
+
+When an app opens a window while the canvas is away, the add-on may lift it to the front level so the
+app is usable. On return, those windows are now lowered together before the listing runs; otherwise the
+listing rejects anything above the normal level and the window stays above every canvas, untracked.
+The lift/lower bookkeeping is per canvas and is only undone when no canvas is in an entered window.
+
+A new window is also claimed by the canvas the user is looking at when it is announced, even if the app
+put it on another display; existing windows keep their display. It is then placed by the existing
+`placeNewWindows` path: into the visible canvas, beside what is already there, or with the camera moved
+just enough to reveal it. The fix does not broaden which windows are legitimate canvas material (menus,
+system panels, overlays and tiny utility windows remain excluded).
 
 ## Build and safety
 

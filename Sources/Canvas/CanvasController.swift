@@ -2189,6 +2189,7 @@ final class CanvasController {
 
     private func reconcile(with list: [WindowInfo]) {
         guard !configuringRenderer, isUp, activeProxy == nil, !handingOff, addingWidgets == nil, !deskEditing else { return }
+        lowerFrontLevelStrays(in: list)
         // The last entered window survives going native-fullscreen, which puts it on another Space
         // and off this list — as long as it still exists at all.
         var keep = lastActiveProxy?.windowID
@@ -5543,6 +5544,9 @@ final class CanvasController {
         env?.watcher.stopObserving()
         beginPendingPip(leaving: wasIn)
         leaveEntered(reconcile: true)
+        // A window lifted while the app was in front is above the canvas; back here it has to be
+        // ordinary again before the listing can take it in.
+        lowerLiftedWindows()
         applyPendingPip()
         desktopFloor.noteReturn()
         // Strip mode: the window you were in, and its app's column, go to the left end of the strip. The
@@ -6103,25 +6107,72 @@ final class CanvasController {
         // on its way) stays hidden until the canvas has placed it, else it popped up full-size.
         guard renderer == .realWindows, additionNumber >= 27, !NSApp.isActive,
               let w = WindowList.onScreen(id), w.layer == 0, let entered = activeProxy, w.pid == entered.pid else { return }
-        LiveWindowsConnection.command(LiveWindowsWire.level(id, LiveWindowsWire.frontLevel))
+        liftToFrontLevel([id])
+    }
+
+    /// Windows this run put at the front level to let an app show while the canvas is away. Back on the
+    /// canvas they have to return to the normal level or the listing sees them as overlay windows and
+    /// never takes them in (a new Chrome window could stay above every canvas for good).
+    private var liftedByCanvas = LiftedWindows()
+
+    /// Lifts windows out of the canvas's reach, remembering them so `lowerLiftedWindows` can undo it.
+    private func liftToFrontLevel(_ ids: [CGWindowID]) {
+        for id in ids {
+            liftedByCanvas.record(id, sent: LiveWindowsConnection.command(
+                LiveWindowsWire.level(id, LiveWindowsWire.frontLevel)))
+        }
+    }
+
+    /// The canvas is back and no window is entered: every window this run lifted shows again under the
+    /// listing at the normal level, so reconciliation can place it on the canvas. Windows already gone
+    /// are forgotten. A failed request stays for the next return.
+    private func lowerLiftedWindows() {
+        guard renderer == .realWindows, additionNumber >= 27,
+              desk?.canvases.contains(where: \.isEntered) != true else { return }
+        let lowered = liftedByCanvas.lower { LiveWindowsConnection.command(LiveWindowsWire.level($0, 0)) }
+        if lowered > 0 {
+            NSLog("Rendering: \(lowered) window(s) lifted above the canvas put back to the normal level")
+            scheduleDiff(after: 0.05)
+        }
+    }
+
+    /// The safety net for a window found at the front level while the canvas is back: a lift whose
+    /// bookkeeping was lost, or one made by an older build. Level 2 isn't an AppKit standard level;
+    /// Sunlight uses it for windows above the canvas. An entered canvas is left alone.
+    private var loweredFrontLevelAt: [CGWindowID: CFTimeInterval] = [:]
+
+    private func lowerFrontLevelStrays(in list: [WindowInfo]) {
+        guard renderer == .realWindows, additionNumber >= 27, NSApp.isActive, activeProxy == nil,
+              !handingOff, desk?.canvases.contains(where: \.isEntered) != true else { return }
+        let now = CACurrentMediaTime()
+        var lowered = 0
+        for w in list where w.pid != myPID && w.layer == Int(LiveWindowsWire.frontLevel) {
+            if let at = loweredFrontLevelAt[w.id], now - at < 1 { continue }
+            loweredFrontLevelAt[w.id] = now
+            if LiveWindowsConnection.command(LiveWindowsWire.level(w.id, 0)) {
+                liftedByCanvas.forget(w.id)
+                lowered += 1
+            }
+        }
+        loweredFrontLevelAt = loweredFrontLevelAt.filter { now - $0.value < 5 }
+        if lowered > 0 {
+            NSLog("Rendering: \(lowered) front-level window(s) put back under the canvas for adoption")
+            scheduleDiff(after: 0.05)
+        }
     }
 
     /// The window entered where it is (`adopt`) and the sheets and prompts on it, lifted above the canvas at
     /// once (sunlight-27); its app's other windows stay under the canvas, where they were, as after a handoff.
     private func liftWindow(_ p: WindowProxy) {
         guard renderer == .realWindows, additionNumber >= 27 else { return }
-        for q in [p] + p.attachedChildren where q.away == nil {
-            LiveWindowsConnection.command(LiveWindowsWire.level(q.windowID, LiveWindowsWire.frontLevel))
-        }
+        liftToFrontLevel(([p] + p.attachedChildren).filter { $0.away == nil }.map(\.windowID))
     }
 
     /// Every on-screen window of `pid` at the normal level lifted above the canvas at once (sunlight-27): an
     /// app left in front with nothing for the canvas shows all of its windows.
     private func liftWindows(of pid: pid_t) {
         guard renderer == .realWindows, additionNumber >= 27, pid != myPID else { return }
-        for w in WindowList.onScreen() where w.pid == pid && w.layer == 0 {
-            LiveWindowsConnection.command(LiveWindowsWire.level(w.id, LiveWindowsWire.frontLevel))
-        }
+        liftToFrontLevel(WindowList.onScreen().filter { $0.pid == pid && $0.layer == 0 }.map(\.id))
     }
 
     /// Other apps' windows found at the canvas's own levels (sunlight-27's `canvasLevel`, `frontLevel`)

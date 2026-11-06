@@ -56,4 +56,9 @@ Before replacing `/Applications/Sunlight.app`, quit it normally and back up the 
 
 ## Verification boundaries
 
-Pure tests cover discovery eligibility, malformed metadata, retry timing, AX identity matching, persistence/input matching, and preservation of full render checkpoints. The existing suite covers capture limits, camera/display coordinate conversion, parking, wire serialization, and fake Dock socket leases. Real-app/private-window and multi-monitor visual behavior also needs a live smoke test with the installed build; passing unit tests alone is not proof that every app or monitor topology works.
+The current suite has 588 tests, covering discovery eligibility, malformed metadata, retry timing,
+AX identity matching, persistence/input matching, preservation of full render checkpoints, and
+lift/lower bookkeeping for new windows. The existing suite covers capture limits, camera/display
+coordinate conversion, parking, wire serialization, and fake Dock socket leases. Real-app/private-window
+and multi-monitor visual behavior also needs a live smoke test with the installed build; passing unit
+tests alone is not proof that every app or monitor topology works.

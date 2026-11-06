@@ -46,7 +46,7 @@ final class Desk {
             // A window the user has just opened belongs to the canvas they are looking at, even if the
             // app put it on another display: the listing then places it in view instead of leaving it
             // over there, untransformed, until the canvas changes. Existing windows keep their owner.
-            if id != 0, self.owner[id] == nil { self.owner[id] = self.current.display.uuid }
+            if id != 0, self.owner[id] == nil { self.owner[id] = self.canvasForNewWindow().display.uuid }
             self.canvases.forEach { $0.windowServerCreated(id) }
         }
         WindowServerEvents.onWindowRemoved = { [weak self] _ in self?.canvases.forEach { $0.windowServerRemoved() } }
@@ -127,6 +127,15 @@ final class Desk {
 
     /// The canvas a window is entered from, else the pointer's.
     var current: CanvasController { canvases.first(where: \.isEntered) ?? pointed }
+
+    /// Where a just-announced window starts: the entered canvas, else the canvas holding the front
+    /// app's windows (an app on another display used without being entered), else the pointer's.
+    private func canvasForNewWindow() -> CanvasController {
+        if let entered = canvases.first(where: \.isEntered) { return entered }
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+           let holder = canvases.first(where: { $0.hasWindows(of: pid) }) { return holder }
+        return pointed
+    }
 
     /// Every canvas but `c` in front, under it: Sunlight came forward through one of them.
     func bringForward(besides c: CanvasController) {

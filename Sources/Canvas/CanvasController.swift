@@ -1510,12 +1510,26 @@ final class CanvasController {
     /// The Mission Control key — on the canvas: go back into the last window. In a window: come back to the canvas.
     func toggle() {
         guard addingWidgets == nil, !isSetupShowing, !paused else { return }   // the desktop is in edit mode; Done comes back
-        if NSApp.isActive {
-            if let p = lastActiveProxy, proxies[p.windowID] != nil { handoff(to: p) }
-            else if let p = lastActiveProxy, away[p.windowID] === p { bringBack(p) }
-        } else {
-            show()
-        }
+        if NSApp.isActive { enterLastWindow() } else { show() }
+    }
+
+    /// The window last entered from this canvas: the second F3 goes back into it.
+    func enterLastWindow() {
+        guard NSApp.isActive, activeProxy == nil, addingWidgets == nil, !isSetupShowing, !paused else { return }
+        if let p = lastActiveProxy, proxies[p.windowID] != nil { handoff(to: p) }
+        else if let p = lastActiveProxy, away[p.windowID] === p { bringBack(p) }
+    }
+
+    /// Fits this display's windows for the desk-wide overview.
+    func fitOverview() {
+        guard !paused else { return }
+        view.fitAll(animated: true)
+    }
+
+    /// A canvas returns to the camera it had before the desk-wide overview.
+    func restoreOverviewCamera(_ camera: Camera) {
+        guard !paused else { return }
+        view.animateCamera(to: camera)
     }
 
     /// A configured zoom binding, anchored under the pointer (or at this display's centre).
@@ -1551,7 +1565,13 @@ final class CanvasController {
             guard addingWidgets == nil, !isSetupShowing else { return }   // the desktop is in edit mode; Done comes back
             // A flick from a window has already brought the canvas (its drag did): it still means See
             // All, not back again. On the canvas, either gesture again goes back into the last window.
-            if fromWindow || !NSApp.isActive { showCanvas(fitAll: true) } else { toggle() }
+            if let desk, desk.canvases.count > 1 {
+                if fromWindow || !NSApp.isActive { desk.showOverview() } else { desk.toggle() }
+            } else if fromWindow || !NSApp.isActive {
+                showCanvas(fitAll: true)
+            } else {
+                toggle()
+            }
         case .spread:
             NSLog("Pan: four-finger spread")
             showDesktop()
@@ -5366,6 +5386,7 @@ final class CanvasController {
     /// The moment a real window is in front of the canvas, pixel-matched to its proxy. Shared by the
     /// canvas-initiated handoff (which activates the app) and takeover's absorb (the app is already active).
     private func enter(_ p: WindowProxy, realFrame: CGRect, activateApp: Bool) {
+        desk?.cancelOverview(entering: self)   // the user picked a window; no saved camera to go back to
         clearLaunches()   // the user chose a window; a launch still in flight is then absorbed as before
         activeProxy = p
         lastActiveProxy = p

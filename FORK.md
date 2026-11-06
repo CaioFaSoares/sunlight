@@ -48,6 +48,15 @@ put it on another display; existing windows keep their display. It is then place
 just enough to reveal it. The fix does not broaden which windows are legitimate canvas material (menus,
 system panels, overlays and tiny utility windows remain excluded).
 
+### #5 — Overview on every display
+
+With multiple displays, the Mission Control/F3 overview is now one desk-wide state: the first press fits
+every display at once, so both canvases are zoomed out and windows on either can be rearranged. The
+second press restores each canvas's previous camera. If the overview began in a window, the canvas that
+had that window returns into it after restoring the others. The same path is used by See All, the
+configured Show Overview/Toggle actions and the four-finger See All gesture. A single-display setup
+keeps the old behaviour.
+
 ## Build and safety
 
 Run `swift test`, then `make app SIGN="Apple Development: …"` (or use your own signing identity). The application keeps `com.spacefarm.sunlight` to preserve layout/preferences. A different signing team may require granting Accessibility/Screen Recording again and approving the background helper. Do not change SIP or other system protections to install this fork.

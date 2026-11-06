@@ -206,12 +206,68 @@ final class Desk {
     func performBinding(_ action: CanvasBindingAction) {
         switch action {
         case .toggleOverview: toggle()
-        case .showOverview: current.showCanvas(fitAll: true)
+        case .showOverview: showOverview()
         case .returnToWindow:
             // Unlike Toggle, this action never brings the canvas forward from a native window.
-            if NSApp.isActive { toggle() }
+            guard NSApp.isActive else { break }
+            if overview != nil { endOverview() }
+            else if let c = canvases.first(where: { $0.lastEnteredID != nil }) { c.enterLastWindow() }
         case .zoomIn: current.zoomCanvas(by: 1.25)
         case .zoomOut: current.zoomCanvas(by: 0.8)
+        }
+    }
+
+    /// The cameras from before an overview on every display. The overview is one state for the whole
+    /// desk, so F3 pressed on the second display returns every canvas, not just the one under the pointer.
+    private struct Overview {
+        let cameras: [String: Camera]
+        /// The canvas that had a window in use when the overview began, if any: a second F3 returns there.
+        let entered: CanvasController?
+    }
+    private var overview: Overview?
+    var isOverviewing: Bool { overview != nil }
+
+    /// Fits both displays at once. On one display this is the old See All.
+    func showOverview() {
+        guard !isSetupShowing, !paused else { return }
+        guard canvases.count > 1 else {
+            current.showCanvas(fitAll: true)
+            return
+        }
+        if overview == nil {
+            overview = Overview(
+                cameras: Dictionary(uniqueKeysWithValues: canvases.map { ($0.display.uuid, $0.view.camera) }),
+                entered: canvases.first(where: \.isEntered))
+        }
+        if NSApp.isActive {
+            for c in canvases { c.fitOverview() }
+        } else {
+            // The entered canvas brings every canvas forward; then each frames its own windows.
+            current.showCanvas(fitAll: true)
+            for c in canvases where c !== current { c.fitOverview() }
+        }
+    }
+
+    /// The second F3: every canvas back to the camera it had before the overview, then into the window
+    /// that was in use (if the overview began there).
+    func endOverview() {
+        guard let overview else { return }
+        self.overview = nil
+        for c in canvases {
+            if let camera = overview.cameras[c.display.uuid] { c.restoreOverviewCamera(camera) }
+        }
+        if let entered = overview.entered {
+            DispatchQueue.main.async { entered.enterLastWindow() }
+        }
+    }
+
+    /// A window was entered from the overview: its camera is the handoff's, not the saved one, and the
+    /// other displays return to the cameras they had before the overview.
+    func cancelOverview(entering entered: CanvasController? = nil) {
+        guard let overview else { return }
+        self.overview = nil
+        for c in canvases where c !== entered {
+            if let camera = overview.cameras[c.display.uuid] { c.restoreOverviewCamera(camera) }
         }
     }
 
@@ -220,7 +276,11 @@ final class Desk {
     func showCanvas(fitAll: Bool) { current.showCanvas(fitAll: fitAll) }
 
     /// The Mission Control key: on the canvas, back into the window last entered, on whichever display; in a window, the canvas.
+    /// With multiple displays, the whole desk has one overview: the first press fits every display, the
+    /// second returns every display.
     func toggle() {
+        if overview != nil { return endOverview() }
+        if canvases.count > 1 { return showOverview() }
         if NSApp.isActive, let id = mru.first(where: { id in canvases.contains { $0.lastEnteredID == id } }),
            let c = canvases.first(where: { $0.lastEnteredID == id }) {
             c.toggle()
@@ -354,14 +414,14 @@ final class Desk {
                 // waits for the release to know it's a tap. Held, the canvas fits everything to pick from.
                 let hold = DispatchWorkItem { [weak self] in
                     guard let self, case .onCanvas = self.missionControlPress else { return }
-                    self.pointed.seeAllHeld()
+                    self.seeAllHeld()
                 }
                 missionControlPress = .onCanvas
                 missionControlHold = hold
                 DispatchQueue.main.asyncAfter(deadline: .now() + MissionControlHold.threshold, execute: hold)
             } else {
                 missionControlPress = .fromWindow
-                current.handle(command)
+                if canvases.count > 1 { showOverview() } else { current.handle(command) }
             }
             return
         case .missionControlUp(let held):
@@ -382,6 +442,11 @@ final class Desk {
         default:
             (switching ?? current).handle(command)
         }
+    }
+
+    /// Held on the canvas: See All. With several displays it fits all of them, not only the pointed one.
+    private func seeAllHeld() {
+        if canvases.count > 1 { showOverview() } else { pointed.seeAllHeld() }
     }
 
     /// The Mission Control key, between going down and being let go (`MissionControlHold`).

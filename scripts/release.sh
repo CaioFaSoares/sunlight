@@ -2,9 +2,10 @@
 # A public release, in build/release/: the notarized zip and DMG, Sparkle's appcast.xml and the Homebrew cask.
 #   NOTARY_PROFILE=<profile> scripts/release.sh            # build and check; prints how to publish
 #   NOTARY_PROFILE=<profile> scripts/release.sh --publish  # also creates the GitHub release with gh
-# Bump CFBundleShortVersionString and CFBundleVersion in Info.plist first: Sparkle offers an update only
-# when CFBundleVersion is higher than the one installed. Needs a Developer ID Application identity, a
-# notarytool profile, and Sparkle's private key in the login keychain (`make sparkle-keys`).
+# Bump FORK_REVISION first; the version and CFBundleVersion are derived from the upstream release in
+# Info.plist by scripts/fork-version.sh, so an upstream rebase never leaves a fixed fork version behind.
+# Needs a Developer ID Application identity, a notarytool profile, and Sparkle's private key in the
+# login keychain (`make sparkle-keys`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source packaging/release.conf
@@ -13,7 +14,7 @@ source packaging/release.conf
 [[ -n "$SPARKLE_PUBLIC_KEY" ]] || { echo "Set SPARKLE_PUBLIC_KEY in packaging/release.conf (make sparkle-keys)" >&2; exit 1; }
 
 scripts/package.sh
-VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)
+VERSION=$(scripts/fork-version.sh version)
 TAG="v$VERSION"
 OUT=build/release
 rm -rf "$OUT"

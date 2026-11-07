@@ -78,6 +78,13 @@ handed off, or its lease ends, so a window used at 1:1 is never clipped to where
 a tile keeps its rounded corners. Single-display setups send no clips: nothing can show past the one
 screen anyway.
 
+The windows a handoff keeps on show around the entered one are real, at 1:1, in front of the canvas,
+and no frame reaches them while the canvas is away: the handoff itself now carries each one's clip
+(sunlight-59, 28-byte kept entries) and the add-on shapes them once they have landed, so a window kept beside the
+entered one stays on show when it is on this display — whole, or cut at the edge — and one the app
+raised out of view is shaped to nothing rather than put over another display. A window entered later,
+from a canvas whose lease was dropped, has its clip put back by ID alone, so it never shows cut.
+
 ### #7 — Center the window in view
 
 A canvas place is a global point, so a window can sit past the screen's edge — over another display's
@@ -93,6 +100,16 @@ The movement is a `strength` away from the window's place towards the middle (1 
 action is written so a Settings control for it can land on top without touching the geometry
 (`CanvasController.centeredOrigin`).
 
+### #8 — Entering a window centers it
+
+Settings › Windows › **Entering a window centers it** (on by default) makes a click on the canvas take the
+window to the middle of the visible area, the camera centring on it at 1:1, instead of entering it where
+it is around the clicked spot. A window whose place on the canvas is past the screen's edge — over
+another display's — is then entered on this screen, whole, rather than at the edge with part of it out of
+view; the seam's in-place growth is what a click gets with the setting off. The plan still says a click
+entered the window, so the way in lasts the double-click interval and a second click is never the app's.
+The double-click / ⏎ entry is unchanged, and so is a pinch in (in place, the handoff gesture).
+
 ## Build and safety
 
 Run `swift test`, then `make app SIGN="Apple Development: …"` (or use your own signing identity). The application keeps `com.spacefarm.sunlight` to preserve layout/preferences. A different signing team may require granting Accessibility/Screen Recording again and approving the background helper. Do not change SIP or other system protections to install this fork.
@@ -103,7 +120,7 @@ Before replacing `/Applications/Sunlight.app`, quit it normally and back up the 
 
 ## Verification boundaries
 
-The current suite has 593 tests, covering discovery eligibility, malformed metadata, retry timing,
+The current suite has 595 tests, covering discovery eligibility, malformed metadata, retry timing,
 AX identity matching, persistence/input matching, preservation of full render checkpoints,
 lift/lower bookkeeping for new windows, the clip geometry and clipped-frame layout of a
 window on a display, and where Center in View puts a window at each strength. The add-on's own harness (`LiveWindows/test-session.m`, fake window server)

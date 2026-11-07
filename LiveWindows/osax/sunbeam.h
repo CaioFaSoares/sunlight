@@ -690,6 +690,17 @@ static void sunbeam_clip_reset(uint32_t wid, int owner)
     if (SLSGetWindowOwner(SLSMainConnectionID(), wid, &current) == kCGErrorSuccess && current == owner) sunbeam_shape_apply(wid, 0);
 }
 
+/// The same for a window the lease doesn't hold (one a handoff kept on show, or one entered straight
+/// from a canvas whose lease was dropped): looked up by its ID, and its owner's.
+static void sunbeam_clip_reset_any(uint32_t wid)
+{
+    for (int i = 0; i < SUNBEAM_LIMIT; ++i) {
+        if (sunbeam_clipped_list[i].wid != wid) continue;
+        sunbeam_clip_reset(wid, sunbeam_clipped_list[i].owner);
+        return;
+    }
+}
+
 // MARK: Release
 
 /// Puts a window back as the add-on found it: its place in the stacking order, its transform, and
@@ -1512,6 +1523,8 @@ struct sunbeam_kept {
     CGPoint point;                // where it goes natively (no higher than the visible top, sunlight-28)
     CGPoint drawn;                // where the canvas draws it, which `settled` puts it at from `point`
     CGAffineTransform settled;
+    float clip[4];                // the part of it on the canvas's display, its own points (sunlight-58)
+    bool has_clip;
 };
 
 /// Whether a native move can go in a transaction (sunlight-15). The window server keeps a window's
@@ -1650,7 +1663,7 @@ static void sunbeam_handoff_apply(CFTypeRef transaction, uint32_t wid, CGPoint p
 /// place from wherever it is. A window to keep must be leased, and is put back with the rest if it
 /// isn't, is gone, or won't move. False only when the entered window is gone or won't move.
 static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint32_t backdrop,
-                            const char *keep, int keep_count,
+                            const char *keep, int keep_count, int stride,
                             struct sunbeam_saved *saved, int count, const struct sunbeam_session_state *state)
 {
     double top = state->top;
@@ -1694,7 +1707,7 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
     int kept_count = 0;
     for (int k = 0; k < keep_count && overlay; ++k) {
         uint32_t kid; float kx, ky;
-        memcpy(&kid, keep + k * 12, 4); memcpy(&kx, keep + k * 12 + 4, 4); memcpy(&ky, keep + k * 12 + 8, 4);
+        memcpy(&kid, keep + k * stride, 4); memcpy(&kx, keep + k * stride + 4, 4); memcpy(&ky, keep + k * stride + 8, 4);
         int index = -1;
         for (int i = 0; i < count; ++i) if (saved[i].wid == kid && i != entered) index = i;
         if (index < 0 || pinned[index] || !sunbeam_owner_matches(&saved[index])) continue;
@@ -1713,6 +1726,8 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
         kept[kept_count].point = kpoint;
         kept[kept_count].drawn = kdrawn;
         kept[kept_count].settled = CGAffineTransformMakeTranslation(-kdrawn.x, -kdrawn.y);
+        kept[kept_count].has_clip = stride == 28;
+        if (stride == 28) memcpy(kept[kept_count].clip, keep + k * stride + 12, 16);
         ++kept_count;
     }
     uint32_t ov = overlay ? overlay : state->overlay;
@@ -1747,8 +1762,17 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
     // used at 1:1 must not be clipped to the part of it a canvas had on that canvas's display. The
     // windows kept on show with it are at their native place too.
     sunbeam_shape_reset(wid);
-    if (entered >= 0) sunbeam_clip_reset(wid, saved[entered].owner);
-    for (int k = 0; k < kept_count; ++k) sunbeam_clip_reset(saved[kept[k].index].wid, saved[kept[k].index].owner);
+    sunbeam_clip_reset_any(wid);   // the window used at 1:1 shows all of itself
+    // The windows kept on show are real, at 1:1, in front of the canvas, and no frame clips them: each is
+    // shaped to the part of itself still on this display, so one beside the entered window shows nowhere
+    // else (sunlight-58). Those the add-on put out of sight get an empty shape: a point of themselves,
+    // off the screen. Applied after the moves and their commit, so the bounds the shape sits at are the
+    // window's own new ones.
+    for (int k = 0; k < kept_count; ++k) {
+        struct sunbeam_saved *entry = &saved[kept[k].index];
+        if (!kept[k].has_clip) { sunbeam_clip_reset_any(entry->wid); continue; }
+        sunbeam_clip_apply(cid, entry->wid, entry->owner, kept[k].clip);
+    }
     // Levels changed in a transaction: the orders once more, directly, in case the window server took
     // them before the levels (see `sunbeam_release_all`). A no-op when it didn't.
     if (changed) {
@@ -1841,6 +1865,22 @@ static uint8_t sunbeam_anchor_set(const char *bytes, int length, struct sunbeam_
 
 // MARK: Session
 
+/// Whether a handoff request's length is one of the forms taken: 13 (the window and its point), 21 (with
+/// the canvas's overlay and backdrop), and 22 plus 12 or 28 bytes per window kept on show, or 26 plus that
+/// with the trailing top. The count byte the kept entries are counted by is checked where they are read.
+static bool sunbeam_handoff_length(int length)
+{
+    if (length == 13 || length == 21) return true;
+    if (length < 22) return false;
+    int payload = length - 22;
+    if (payload % 12 == 0 || payload % 28 == 0) return true;
+    if (length >= 26) {
+        payload = length - 26;
+        if (payload % 12 == 0 || payload % 28 == 0) return true;
+    }
+    return false;
+}
+
 static void *sunbeam_session(void *context)
 {
     int fd = (int)(intptr_t)context;
@@ -1917,21 +1957,37 @@ static void *sunbeam_session(void *context)
             pthread_mutex_unlock(&sunbeam_lock);
             if (send(fd, &status, 1, 0) != 1) break;
             continue;
-        } else if ((uint8_t)bytes[0] == SUNBEAM_HANDOFF && (length == 13 || length == 21 ||
-                   (length > 22 && (length - 22) % 12 == 0 && (uint8_t)bytes[21] == (length - 22) / 12) ||
-                   (length >= 26 && (length - 26) % 12 == 0 && (uint8_t)bytes[21] == (length - 26) / 12))) {
+        } else if ((uint8_t)bytes[0] == SUNBEAM_HANDOFF && sunbeam_handoff_length(length)) {
             // 13 bytes: the window and its native position. 21 (since sunlight-3): also the canvas's
             // overlay and backdrop, so the raise above the canvas and the backdrop's tuck under it land
             // with the rest. Sent as separate requests after the acknowledgement, they could only be
             // made atomic by the canvas holding its own update freeze across this request — which
             // deadlocks against the Dock's own freeze until the window server's timeout. Longer (since
-            // sunlight-10): a count, then the windows kept on show with it, 12 bytes each. A trailing
-            // float (since sunlight-28): the top of the display's visible part, under the menu bar,
-            // which no window goes above natively (`sunbeam_native_at`).
+            // sunlight-10): a count, then the windows kept on show with it, 12 bytes each, or 28 with
+            // each one's clip (sunlight-58, see `kept_clip`). A trailing float (since sunlight-28): the
+            // top of the display's visible part, under the menu bar, which no window goes above
+            // natively (`sunbeam_native_at`).
             sunbeam_status = 7;
             uint32_t wid, overlay = 0, backdrop = 0; float x, y;
             int keep_count = length > 21 ? (uint8_t)bytes[21] : 0;
-            bool with_top = length >= 26 && (length - 26) % 12 == 0;
+            // Which of the forms this is: the entries are 12 bytes each, or 28 with each one's clip
+            // (sunlight-58), with or without the trailing top. The count byte and the length have to
+            // agree, or the request is refused (a count that doesn't match the entries once read past
+            // the end of them).
+            int stride = 0;
+            bool with_top = false;
+            if (keep_count == 0) {
+                stride = 12;
+                with_top = length >= 26;
+            } else if (length >= 26 && (length - 26) % 28 == 0 && keep_count == (length - 26) / 28) {
+                stride = 28; with_top = true;
+            } else if (length >= 22 && (length - 22) % 28 == 0 && keep_count == (length - 22) / 28) {
+                stride = 28;
+            } else if (length >= 26 && (length - 26) % 12 == 0 && keep_count == (length - 26) / 12) {
+                stride = 12; with_top = true;
+            } else if (length >= 22 && (length - 22) % 12 == 0 && keep_count == (length - 22) / 12) {
+                stride = 12;
+            }
             if (with_top) {
                 float top;
                 memcpy(&top, bytes + length - 4, 4);
@@ -1942,11 +1998,17 @@ static void *sunbeam_session(void *context)
             bool sane = keep_count <= SUNBEAM_LIMIT;
             for (int k = 0; sane && k < keep_count; ++k) {
                 uint32_t kid; float kx, ky;
-                memcpy(&kid, bytes + 22 + k * 12, 4); memcpy(&kx, bytes + 26 + k * 12, 4); memcpy(&ky, bytes + 30 + k * 12, 4);
+                memcpy(&kid, bytes + 22 + k * stride, 4); memcpy(&kx, bytes + 26 + k * stride, 4); memcpy(&ky, bytes + 30 + k * stride, 4);
                 sane = kid && kid != wid && kid != overlay && kid != backdrop && isfinite(kx) && isfinite(ky);
+                if (sane && stride == 28) {
+                    float c[4];
+                    memcpy(c, bytes + 34 + k * stride, 16);
+                    for (int j = 0; j < 4; ++j) if (!isfinite(c[j])) sane = false;
+                    if (c[2] < 0 || c[3] < 0) sane = false;
+                }
             }
-            if (sane && wid && isfinite(x) && isfinite(y) && wid != overlay && wid != backdrop && (!overlay || overlay != backdrop)) {
-                ok = sunbeam_handoff(wid, CGPointMake(x, y), overlay, backdrop, bytes + 22, keep_count, saved, count, &state);
+            if (sane && stride && wid && isfinite(x) && isfinite(y) && wid != overlay && wid != backdrop && (!overlay || overlay != backdrop)) {
+                ok = sunbeam_handoff(wid, CGPointMake(x, y), overlay, backdrop, bytes + 22, keep_count, stride, saved, count, &state);
                 if (ok) {
                     // Every window is back where the add-on found it, and the entered one (and any
                     // kept with it) keeps its committed position with the native identity transform

@@ -4744,7 +4744,8 @@ final class CanvasController {
         // Where the real window will sit at 1:1 (pixel-aligned, below the menu bar) and the camera that
         // puts it there: the camera goes to the window, not the window to the camera.
         let plan = Handoff.plan(placement, rect: p.worldRect, camera: view.camera, visible: visibleTopLeft, scale: scale,
-                                tiledArea: tiledArea(of: p))
+                                tiledArea: tiledArea(of: p),
+                                centerClick: Settings.centerOnEnter)
         let origin = plan.origin
         let clicked = plan.clicked
 
@@ -4784,6 +4785,7 @@ final class CanvasController {
                                                backdrop: self.backdrop.map { CGWindowID($0.windowNumber) } ?? 0,
                                                shadow: shadow,
                                                keeping: keeping,
+                                               clips: self.keptClips(kept),
                                                top: self.toGlobal(CGPoint(x: 0, y: self.visibleTopLeft.minY)).y,
                                                pinned: self.pipIDs(except: p)) else {
                     self.handingOff = false
@@ -5204,16 +5206,32 @@ final class CanvasController {
             // them where the canvas has them, off screen if that's out of view, in the handoff's one update.
             guard q.pid == p.pid || (r.intersects(screenRect) && !r.intersection(screenRect).isEmpty) else { continue }
             // Where the canvas draws it: the add-on keeps the native place under the menu bar itself
-            // (sunlight-28) and draws the window there from it.
-            let at = CGRect(origin: nativeOrigin(of: q, at: camera, clamped: false), size: r.size)
-            // A window kept on show is real, at 1:1, and no frame clips it: one whose place is past this
-            // display's edge would be on show over a neighbouring display's canvas (the fork's `#6`), and
-            // flash there when the canvas comes back. It stays under the canvas instead — off this
-            // display's screen anyway — and comes back with it, clipped by the frame.
-            guard screenRect.contains(at) else { continue }
-            kept.append((q, at))
+            // (sunlight-28) and draws the window there from it. One kept off this display's screen is put
+            // there too, out of sight, and shaped to nothing by the handoff (`keptClips`).
+            kept.append((q, CGRect(origin: nativeOrigin(of: q, at: camera, clamped: false), size: r.size)))
         }
         return Array(kept.suffix(LiveWindowsWire.maxKept))
+    }
+
+    /// The part of each window kept on show that is still on this display, in its own points (sunlight-58).
+    /// The handoff makes each of them real, at 1:1, and no frame clips them: one beside the entered window
+    /// would otherwise show past the screen's edge, over another display's canvas — and a window kept off
+    /// the screen entirely is put there out of sight, so it is shaped to nothing (`clip` of zero, which the
+    /// add-on draws as a single point of the window). Nil with an add-on older than that: it can't clip.
+    private func keptClips(_ kept: [(proxy: WindowProxy, at: CGRect)]) -> [CGWindowID: CGRect]? {
+        guard additionNumber >= LiveWindowsWire.handoffClipsFrom else { return nil }
+        let screen = CGRect(origin: .zero, size: view.bounds.size)
+        // The add-on keeps no window's top above the menu bar (`sunbeam_native_at`): where it lands.
+        let top = visibleTopLeft.minY
+        var clips: [CGWindowID: CGRect] = [:]
+        for (p, at) in kept {
+            let landed = CGRect(x: at.minX, y: max(at.minY, top), width: at.width, height: at.height)
+            let onScreen = CGRect(x: screen.minX - landed.minX, y: screen.minY - landed.minY,
+                                  width: screen.width, height: screen.height)
+            let visible = onScreen.intersection(CGRect(origin: .zero, size: landed.size))
+            clips[p.windowID] = visible.isNull || visible.isEmpty ? .zero : visible
+        }
+        return clips
     }
 
     // MARK: Using a window at 1:1

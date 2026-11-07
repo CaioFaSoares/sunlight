@@ -219,6 +219,28 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertFalse(LiveWindowsWire.shadowInDock(nil))
     }
 
+    func testHandoffCarriesTheClippedKeptWindows() {
+        // A kept window with its clip (sunlight-58): 28 bytes an entry, the clip after the point.
+        XCTAssertEqual(LiveWindowsWire.handoff(2, at: CGPoint(x: 1, y: -2), overlay: 7, backdrop: 5,
+                                               keeping: [(3, CGPoint(x: 4, y: 8))],
+                                               clips: [3: CGRect(x: 10, y: 20, width: 30, height: 40)]),
+                       Data([50, 0, 0x73, 2, 0, 0, 0, 0, 0, 0x80, 0x3f, 0, 0, 0, 0xc0, 7, 0, 0, 0, 5, 0, 0, 0,
+                             1, 3, 0, 0, 0, 0, 0, 0x80, 0x40, 0, 0, 0, 0x41,
+                             0, 0, 0x20, 0x41, 0, 0, 0xa0, 0x41, 0, 0, 0xf0, 0x41, 0, 0, 0x20, 0x42]))
+        // A kept window with no clip in the dictionary is shaped to nothing, not left as it was.
+        XCTAssertEqual(LiveWindowsWire.handoff(2, at: .zero, overlay: 7, backdrop: 5,
+                                               keeping: [(3, CGPoint(x: 4, y: 8))], clips: [:]),
+                       LiveWindowsWire.handoff(2, at: .zero, overlay: 7, backdrop: 5,
+                                               keeping: [(3, CGPoint(x: 4, y: 8))], clips: [3: .zero]))
+        // With the visible top after the entries (sunlight-28), and no clip asked for, the old form.
+        XCTAssertEqual(LiveWindowsWire.handoff(2, at: CGPoint(x: 1, y: -2), overlay: 7, backdrop: 5,
+                                               keeping: [(3, CGPoint(x: 4, y: 8))], top: 30).count, 40)
+        XCTAssertEqual(LiveWindowsWire.handoff(2, at: CGPoint(x: 1, y: -2), overlay: 7, backdrop: 5,
+                                               keeping: [(3, CGPoint(x: 4, y: 8))],
+                                               clips: [3: CGRect(x: 10, y: 20, width: 30, height: 40)], top: 30).count,
+                       56)
+    }
+
     func testAddOnVersionDecidesWhetherAHandoffNeedsALease() {
         XCTAssertEqual(LiveWindowsWire.additionNumber("sunlight-5"), 5)
         XCTAssertEqual(LiveWindowsWire.additionNumber("sunlight-12"), 12)
@@ -300,5 +322,8 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertTrue(LiveWindowsWire.clipsInDock(LiveWindowsWire.additionVersion))
         XCTAssertFalse(LiveWindowsWire.clipsInDock("sunlight-57"))
         XCTAssertFalse(LiveWindowsWire.clipsInDock(nil))
+        XCTAssertTrue(LiveWindowsWire.handoffClipsInDock(LiveWindowsWire.additionVersion))
+        XCTAssertFalse(LiveWindowsWire.handoffClipsInDock("sunlight-58"))
+        XCTAssertFalse(LiveWindowsWire.handoffClipsInDock(nil))
     }
 }

@@ -128,6 +128,23 @@ final class HandoffTests: XCTestCase {
         XCTAssertEqual(fixing.toScreen(window.origin), CGPoint(x: -200, y: 100))
     }
 
+    func testAClickedWindowGoesToTheMiddleWhenEnteringCentersIt() {
+        let clicked = Handoff.plan(.clicked(at: CGPoint(x: 700, y: 500), offset: CGPoint(x: 100, y: 50)),
+                                   rect: window, camera: Camera(origin: CGPoint(x: 2500, y: 1500), zoom: 0.5),
+                                   visible: visible, scale: scale)
+        // Where the click landed: the window grows to 1:1 around the spot, its top-left 100, 50 out of it.
+        XCTAssertEqual(clicked.origin, CGPoint(x: 600, y: 450))
+        XCTAssertNotNil(clicked.inPlace)
+        XCTAssertTrue(clicked.clicked)
+        let centred = Handoff.plan(.clicked(at: CGPoint(x: 700, y: 500), offset: CGPoint(x: 100, y: 50)),
+                                   rect: window, camera: Camera(origin: CGPoint(x: 2500, y: 1500), zoom: 0.5),
+                                   visible: visible, scale: scale, centerClick: true)
+        XCTAssertEqual(centred.origin, Handoff.centredOrigin(of: window, in: visible))
+        XCTAssertNil(centred.inPlace)
+        XCTAssertTrue(centred.clicked)   // still the way in, so it lasts the double-click interval
+        XCTAssertEqual(centred.camera.toScreen(window.origin), centred.origin)
+    }
+
     // MARK: Center in View
 
     func testCenteringInViewPutsTheWindowAtTheMiddleOfTheVisibleArea() {

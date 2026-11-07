@@ -443,6 +443,7 @@ enum Settings {
     private static let stripModeEnabledKey = "StripModeEnabled"
     private static let multipleDisplaysKey = "MultipleDisplaysEnabled"
     private static let useScaledWindowsKey = "UseScaledWindowsEnabled"
+    private static let centerOnEnterKey = "CenterWindowOnEnter"
     private static let scaledClickZoomsKey = "UseScaledWindowsClickZooms"
     private static let scaledHoverFocusKey = "UseScaledWindowsHoverFocus"
     private static let scaledHoverScrollKey = "UseScaledWindowsHoverScroll"
@@ -491,6 +492,15 @@ enum Settings {
             defaults.set(newValue, forKey: useScaledWindowsKey)
             NotificationCenter.default.post(name: experimentalFeaturesDidChange, object: nil)
         }
+    }
+
+    /// Entering a window from the canvas brings it to the middle of the visible area, the camera on it,
+    /// rather than entering it where it is around the clicked spot (the seam). On by default: a window
+    /// whose place on the canvas is past the screen's edge — over another display's — is entered on this
+    /// screen, whole, instead of at the edge with part of it out of view.
+    static var centerOnEnter: Bool {
+        get { defaults.object(forKey: centerOnEnterKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: centerOnEnterKey) }
     }
 
     /// With windows used at any zoom: single and double click swapped. Off, a click focuses the window
@@ -1375,6 +1385,15 @@ private struct WindowsPane: View {
         Form {
             Section {
                 SettingsStage(caption: caption) { DragStage(placing: placing) }
+            }
+            Section {
+                Toggle(isOn: model.bind({ Settings.centerOnEnter }, { Settings.centerOnEnter = $0 })) {
+                    RowLabel(title: "Entering a window centers it",
+                             subtitle: "A click on the canvas takes it to the middle of the screen.",
+                             info: "Off, a window is entered where it is, around the clicked spot. On, a window whose place on the canvas is past the screen's edge — over another display's — comes into view when you click it.")
+                }
+            } header: {
+                SectionHeader(title: "Entering", detail: "What a click on a window does.")
             }
             Section {
                 Toggle(isOn: model.bind({ Settings.alignmentGuides }, { Settings.alignmentGuides = $0 })) {

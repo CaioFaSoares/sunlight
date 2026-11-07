@@ -288,7 +288,8 @@ final class RealWindowDriver: @unchecked Sendable {
     /// on show as they are through the handoff, or the release for the app in front, above everything.
     @discardableResult
     func restore(handoff: (CGWindowID, CGPoint)? = nil, overlay: CGWindowID = 0, backdrop: CGWindowID = 0,
-                 shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil, above: pid_t = 0,
+                 shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [],
+                 clips: [CGWindowID: CGRect]? = nil, top: CGFloat? = nil, above: pid_t = 0,
                  pinned: [CGWindowID] = []) -> Bool {
         lock.lock(); generation += 1; pending.clear(); pendingAlpha = [:]; scheduled = false; lock.unlock()
         return Watchdog.during("the Dock's answer to a handoff or release (RealWindowDriver.restore)") { queue.sync {
@@ -320,7 +321,8 @@ final class RealWindowDriver: @unchecked Sendable {
                 if handoffInDock {
                     let keeping = LiveWindowsWire.keepsWindowsInDock(additionVersion) ? kept : []
                     let top = LiveWindowsWire.clampsNatively(additionVersion) ? top : nil
-                    try leased.acknowledge(LiveWindowsWire.handoff(id, at: point, overlay: overlay, backdrop: backdrop, keeping: keeping, top: top))
+                    try leased.acknowledge(LiveWindowsWire.handoff(id, at: point, overlay: overlay, backdrop: backdrop,
+                                                                   keeping: keeping, clips: clips, top: top))
                     lastRestoreKept = !keeping.isEmpty
                 } else {
                     try leased.acknowledge(LiveWindowsWire.handoff(id, at: point))

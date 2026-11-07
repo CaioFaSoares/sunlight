@@ -384,6 +384,41 @@ int main(void) {
     // Nothing leased any more: the kept window stays where the handoff left it.
     assert(transforms[5].tx == -300 && transforms[5].ty == -50);
 
+    // Clipped kept windows (sunlight-58): a kept window is real at 1:1 and no frame clips it, so its
+    // handoff entry carries the part of itself still on the display, 28 bytes, its own points.
+    transforms[4] = original; transforms[5] = CGAffineTransformMakeTranslation(-300, -50); levels[4] = -10; levels[5] = -10;
+    fd = start(&thread);
+    send_flagged(fd, three, 3, SUNBEAM_FRAME_FULL, 2);
+    {
+        char keep[2 + 22 + 28]; int16_t keep_size = 22 + 28; uint32_t keep_wid = 4, ov = 2, bd = 1; float kx = 120, ky = 80;
+        memcpy(keep, &keep_size, 2); keep[2] = SUNBEAM_HANDOFF;
+        memcpy(keep + 3, &keep_wid, 4); memcpy(keep + 7, &kx, 4); memcpy(keep + 11, &ky, 4);
+        memcpy(keep + 15, &ov, 4); memcpy(keep + 19, &bd, 4); keep[23] = 1;
+        uint32_t kept = 5; float px = 300, py = -50, clip[4] = {10, 20, 30, 40};
+        memcpy(keep + 24, &kept, 4); memcpy(keep + 28, &px, 4); memcpy(keep + 32, &py, 4);
+        memcpy(keep + 36, clip, 16);
+        assert(send(fd, keep, sizeof(keep), 0) == sizeof(keep));
+        assert(sunbeam_read(fd, &status, 1) && status == 0);
+        assert(shape_rects[5] == 1 && shape_rect[5].origin.x == 10 && shape_rect[5].origin.y == 20);
+        assert(shape_rect[5].size.width == 30 && shape_rect[5].size.height == 40);
+        assert(shape_at[5].x == 300 && shape_at[5].y == -50);
+    }
+    close(fd); pthread_join(thread, NULL);
+    // The lease's end leaves it clipped: it is on show as itself, and the shape has to stay.
+    assert(shape_rect[5].origin.x == 10 && shape_rect[5].size.width == 30);
+    // Entering it later gives it its whole shape back, on a lease that doesn't hold it.
+    fd = start(&thread);
+    {
+        char handoff_bytes[15]; int16_t size = 13; uint32_t wid = 5; float hx = 120, hy = 80;
+        memcpy(handoff_bytes, &size, 2); handoff_bytes[2] = SUNBEAM_HANDOFF;
+        memcpy(handoff_bytes + 3, &wid, 4); memcpy(handoff_bytes + 7, &hx, 4); memcpy(handoff_bytes + 11, &hy, 4);
+        assert(send(fd, handoff_bytes, 15, 0) == 15);
+        assert(sunbeam_read(fd, &status, 1) && status == 0);
+        assert(shape_rects[5] == 1 && shape_rect[5].size.width == 400 && shape_rect[5].size.height == 300);
+    }
+    close(fd); pthread_join(thread, NULL);
+
+
     // With the visible top (sunlight-28): a point above it is drawn there, but the native move stops at
     // the top (AppKit would push a window with its title bar above the menu bar back down), for the
     // entered window and the kept ones alike.

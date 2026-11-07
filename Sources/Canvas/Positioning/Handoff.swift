@@ -48,8 +48,12 @@ enum Handoff {
     /// that puts it there. `camera` is the canvas's camera now; `visible` the display's visible part
     /// in view coordinates; `tiledArea` the area the window is tiled in, if any: a tiled window keeps
     /// its place in its area and the camera lines up with the area, so the screen shows a tiled desktop.
+    /// `centerClick`: a click enters the window at the middle of the visible area instead of where the
+    /// click landed (`Placement.clicked`), the camera centring on it at 1:1 (Settings › Windows ›
+    /// Entering a window centers it). The plan keeps saying the click entered it, so the way in still
+    /// lasts the double-click interval.
     static func plan(_ placement: Placement, rect: CGRect, camera: Camera, visible: CGRect, scale: CGFloat,
-                     tiledArea: CGRect? = nil) -> Plan {
+                     tiledArea: CGRect? = nil, centerClick: Bool = false) -> Plan {
         var origin: CGPoint
         var keepsPlace = false
         var clicked = false
@@ -62,8 +66,9 @@ enum Handoff {
             origin = CGPoint(x: rect.minX - camera.toWorld(point).x + point.x, y: camera.toScreen(rect.origin).y)
             keepsPlace = true
         case .clicked(let point, let offset):
-            origin = CGPoint(x: point.x - offset.x, y: point.y - offset.y)
-            keepsPlace = true
+            origin = centerClick ? centredOrigin(of: rect, in: visible)
+                                 : CGPoint(x: point.x - offset.x, y: point.y - offset.y)
+            keepsPlace = !centerClick
             clicked = true
         }
         if let area = tiledArea {

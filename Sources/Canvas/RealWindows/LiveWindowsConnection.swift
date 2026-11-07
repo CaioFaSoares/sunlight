@@ -27,7 +27,7 @@ enum LiveWindowsWire {
     /// The add-on this build carries (LiveWindows/osax/common.h). An older one in the Dock still works,
     /// with what it has; the app asks to reload it once it answers.
 
-    static let additionVersion = "sunlight-58"
+    static let additionVersion = "sunlight-59"
     /// The first add-on that holds a lease per canvas, so that every display's canvas can show live
     /// windows; with an older one only the main display's does, and the others show pictures.
     static let leasePerCanvas = 13
@@ -79,6 +79,12 @@ enum LiveWindowsWire {
     /// on another display's screen area, where the real window is then drawn over that display's canvas.
     static let clipsFrom = 58
     static func clipsInDock(_ version: String?) -> Bool { additionNumber(version) >= clipsFrom }
+
+    /// Whether an add-on of this version takes each kept window's clip in a handoff (28-byte kept
+    /// entries, sunlight-59): the windows kept on show around the entered one are real, at 1:1, and no
+    /// frame reaches them, so the handoff is where they are shaped to their display.
+    static let handoffClipsFrom = 59
+    static func handoffClipsInDock(_ version: String?) -> Bool { additionNumber(version) >= handoffClipsFrom }
 
     /// A window's corner radius in its own points (sunlight-52): its shape becomes its bounds with corners
     /// of that radius, 0 its full bounds again. The window needn't be leased.
@@ -206,10 +212,14 @@ enum LiveWindowsWire {
     /// canvas and raises the window above it, all in its one screen update. `keeping` (sunlight-10 and
     /// up, with the canvas's IDs): windows that stay on show with it, bottom to top, each going to its
     /// point natively and staying in front of the canvas, under the entered window; a count byte, then
-    /// window, x, y for each. At most `maxKept`. `top` (sunlight-28 and up): the top of the display's
-    /// visible part, global, which the add-on lets no window go above natively; a trailing float.
+    /// window, x, y for each. At most `maxKept`. `clips` (sunlight-58): each kept window's shape, the part
+    /// of its own points still on this display — a window kept on show is real, at 1:1, and no frame
+    /// clips it, so without this one beside the entered window shows past the screen's edge; entries are
+    /// 28 bytes then, not 12. `top` (sunlight-28 and up): the top of the display's visible part, global,
+    /// which the add-on lets no window go above natively; a trailing float.
     static func handoff(_ id: CGWindowID, at point: CGPoint, overlay: CGWindowID = 0, backdrop: CGWindowID = 0,
-                        keeping kept: [(CGWindowID, CGPoint)] = [], top: CGFloat? = nil) -> Data {
+                        keeping kept: [(CGWindowID, CGPoint)] = [], clips: [CGWindowID: CGRect]? = nil,
+                        top: CGFloat? = nil) -> Data {
         var data = Data()
         pack(id, into: &data)
         pack(Float(point.x), into: &data)
@@ -226,6 +236,10 @@ enum LiveWindowsWire {
                     pack(keptID, into: &data)
                     pack(Float(keptPoint.x), into: &data)
                     pack(Float(keptPoint.y), into: &data)
+                    if let clips {
+                        let clip = clips[keptID] ?? .zero
+                        for value in [clip.minX, clip.minY, clip.width, clip.height] { pack(Float(value), into: &data) }
+                    }
                 }
             }
             if let top { pack(Float(top), into: &data) }

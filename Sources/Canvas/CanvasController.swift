@@ -978,13 +978,6 @@ final class CanvasController {
     /// The add-on's number (`LiveWindowsWire.additionNumber`) as it answered when the renderer was set up:
     /// from 8 a frame carries flags, and the canvas decides what is full (below).
     private(set) var additionNumber = 0
-    /// One canvas, and a desk with more displays than it covers (Settings › Experimental › Multiple
-    /// displays off): the other screens are macOS's own, and this canvas doesn't draw on them — it only
-    /// takes windows whose real frame is on its display, and lets go of one moved to another.
-    private var leavesOtherDisplaysAlone: Bool {
-        (desk?.canvases.count ?? 1) == 1 && Display.all.count > 1
-    }
-
     /// The add-on keeps every window's native place under the menu bar (sunlight-28): the native place
     /// the canvas expects for any window is the clamped one, its drawn place carried by the transform.
     private var clampsNatively: Bool { renderer == .realWindows && additionNumber >= 28 }
@@ -1023,16 +1016,6 @@ final class CanvasController {
         let margin = wasParked ? wakeMargin : parkMargin
         let zone = CGRect(origin: .zero, size: view).insetBy(dx: -view.width * margin, dy: -view.height * margin)
         return !(rect.intersects(zone) || target?.intersects(zone) == true)
-    }
-
-    /// Whether a window's own frame is really on a display other than `display`: the display it is on (the
-    /// one holding its centre, else the one it overlaps most) is not that one. A frame on no display at
-    /// all — behind the canvas, or out in the canvas's world — is this canvas's: only a window macOS
-    /// really has on another screen belongs to that screen.
-    nonisolated static func isOnAnotherDisplay(_ real: CGRect, than display: Display, in displays: [Display]) -> Bool {
-        let onSomeDisplay = displays.contains { $0.frame.intersects(real) && !real.intersection($0.frame).isEmpty }
-        guard onSomeDisplay, let i = Display.index(for: real, in: displays) else { return false }
-        return displays[i].uuid != display.uuid
     }
 
     /// Of `rects` (on screen), the indices of at most `limit` of them nearest the view: the ones in view
@@ -2296,14 +2279,6 @@ final class CanvasController {
             if closedByApp[$0.id] != nil { return false }
             let existingReal = renderer == .realWindows && proxies[$0.id]?.pid == $0.pid
             guard existingReal || isCanvasMaterial($0) || isWidget($0) else { return false }
-            // One canvas, and a desk with displays it doesn't cover (Settings › Experimental › Multiple
-            // displays off): those are macOS's own screens, and a window really on one of them isn't this
-            // canvas's to draw. Its listed frame is where the canvas draws it, not where it is, so a
-            // tracked window is judged by its real frame.
-            if leavesOtherDisplaysAlone,
-               CanvasController.isOnAnotherDisplay(proxies[$0.id]?.lastRealFrame ?? $0.bounds, than: display, in: Display.all) {
-                return false
-            }
             // Ownership applies even to an existing transformed proxy. Keeping the shortcut first
             // lets a stale source canvas reclaim a window after it moved to another display.
             return (desk?.canvas(forWindow: $0.id, frame: $0.bounds) ?? self) === self
@@ -2325,16 +2300,6 @@ final class CanvasController {
         }
         var gone = 0
         for (id, p) in proxies where !wantedIDs.contains(id) {
-            // Really on another display (one canvas, the other screens macOS's own): it goes back to being
-            // the app's window, there, and is no longer on this canvas.
-            if leavesOtherDisplaysAlone, p.kind == .window, WindowList.exists(id),
-               CanvasController.isOnAnotherDisplay(p.lastRealFrame, than: display, in: Display.all) {
-                Log.note("Displays: \(p.appName) — \(p.title) is on another display; left to it")
-                letGo(of: id)
-                desk?.forget(id)
-                gone += 1
-                continue
-            }
             // Closed as far as its app is concerned, whatever the window server still lists: not away,
             // and not the last entered window kept for full screen either.
             if closedByApp[id] == nil, p.kind == .window, let why = knownAway(p) {

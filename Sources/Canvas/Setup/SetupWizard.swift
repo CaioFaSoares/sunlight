@@ -163,6 +163,7 @@ final class SetupWizardController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             let opens = SetupFlow.opensAtLaunch(status: status, record: self.record, mac: self.mac,
                                                 previewMode: Settings.previewMode, showsAtLaunch: Self.showsAtLaunch,
+                                                everLoaded: Settings.liveWindowsEverLoaded,
                                                 quietReloadPaused: AdditionReloader.pausedAfterDockCrashes)
             if !opens, !Settings.previewMode, SetupFlow.onlyTheAddOnIsMissing(status) {
                 journal("Live windows not answering at launch; the canvas reloads them by itself")

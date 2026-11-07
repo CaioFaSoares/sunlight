@@ -121,12 +121,16 @@ enum SetupFlow {
     /// reloads it by itself: quitting puts the Mac's Dock settings back and restarts the Dock, which unloads
     /// it, so it's missing at nearly every launch for a moment (public issue #10).
     static func opensAtLaunch(status: SetupStatus, record: Record, mac: Mac, previewMode: Bool, showsAtLaunch: Bool,
-                              quietReloadPaused: Bool = false) -> Bool {
+                              everLoaded: Bool = false, quietReloadPaused: Bool = false) -> Bool {
         if record.resume != nil { return true }
         if previewMode {
             return !record.welcomed || !record.loginItemChosen || !status.accessibility || !status.screenRecording && !record.skippedScreenRecording
                 || !record.learnedBasics
         }
+        // A Mac already set up doesn't need the setup window because the add-on happens to be missing this
+        // moment: a Dock restart at launch (takeover) unloads it, and the canvas loads it back by itself.
+        // That is every launch that follows one; the window used to open on each, on its last page.
+        if onlyTheAddOnIsMissing(status), everLoaded { return false }
         if onlyTheAddOnIsMissing(status), reloadsQuietly(status), !quietReloadPaused { return false }
         return showsAtLaunch && !status.isComplete
     }

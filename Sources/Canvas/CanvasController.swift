@@ -378,6 +378,7 @@ final class CanvasController {
         view.onUseScrollFollow = { [weak self] event in self?.followScroll(event) }
         view.onClose = { [weak self] proxy in self?.close(proxy) }
         view.onTogglePip = { [weak self] proxy in self?.togglePip(proxy) }
+        view.onCenterInView = { [weak self] proxy in self?.centerInView(proxy) }
         view.onPipMoved = { [weak self] _ in self?.rememberSoon() }
         view.onPipReturn = { [weak self] proxy in self?.handoff(to: proxy) }
         view.onPipChanged = { [weak self] in
@@ -1084,6 +1085,13 @@ final class CanvasController {
         }
         // Widgets aren't among them: they stay captured (`streamWidgets`), on the backdrop.
         let flagged = additionNumber >= 8
+        // Every canvas covers one display (`Display`), and a window's place on it is a global point: one
+        // out past the canvas's edge is over a neighbouring display's screen, where the real window used
+        // to be drawn over that display's canvas — and stayed there when the camera came back (the
+        // fork's `#6`). With more than one canvas, each record carries the part of the window still on
+        // its own display, and the add-on clips the drawing to it. A tile keeps its corners: no clip.
+        let clips = flagged && additionNumber >= LiveWindowsWire.clipsFrom && (desk?.canvases.count ?? 1) > 1
+        let limit = LiveWindowsWire.windowLimit(clips: clips)
         let camera = view.camera
         let wire = global(camera)   // the add-on places windows in global points
         let target = view.targetCamera
@@ -1103,9 +1111,9 @@ final class CanvasController {
             if seenIDs.insert(p.windowID).inserted { candidates.append(p) }
         }
         candidates.reverse()
-        if candidates.count > LiveWindowsWire.maxWindows {
+        if candidates.count > limit {
             let keep = CanvasController.nearestIndices(candidates.map { camera.toScreen($0.worldRect) },
-                                                       to: CGRect(origin: .zero, size: size), limit: LiveWindowsWire.maxWindows,
+                                                       to: CGRect(origin: .zero, size: size), limit: limit,
                                                        pinned: handoffTarget.flatMap { t in candidates.firstIndex { $0 === t } })
             if !loggedFrameCap {
                 loggedFrameCap = true
@@ -1113,6 +1121,7 @@ final class CanvasController {
             }
             candidates = keep.map { candidates[$0] }
         }
+        let clipDisplay = clips ? display.frame : nil
         for p in candidates {
             let id = p.windowID
             ids.append(id)
@@ -1124,7 +1133,8 @@ final class CanvasController {
                     all.append(parkedAt)
                     continue
                 }
-                let window = LiveWindowsWire.Window(id: id, worldRect: p.worldRect, inset: p.inset, camera: wire, effect: p.effect)
+                let window = LiveWindowsWire.Window(id: id, worldRect: p.worldRect, inset: p.inset, camera: wire,
+                                                    effect: p.effect, display: clipDisplay)
                 if park {
                     parked[id] = window
                 } else {
@@ -1133,7 +1143,8 @@ final class CanvasController {
                 }
                 all.append(window)
             } else {
-                let window = LiveWindowsWire.Window(id: id, worldRect: p.worldRect, inset: p.inset, camera: wire, effect: p.effect)
+                let window = LiveWindowsWire.Window(id: id, worldRect: p.worldRect, inset: p.inset, camera: wire,
+                                                    effect: p.effect, display: p.pip == nil ? clipDisplay : nil)
                 all.append(window)
                 near.append(window)
             }
@@ -1170,7 +1181,8 @@ final class CanvasController {
         do {
             realWindows.submit(try LiveWindowsWire.snapshot(windows, backdrop: CGWindowID(backdrop.windowNumber),
                                                      overlay: CGWindowID(window.windowNumber),
-                                                     kind: flagged ? (full ? .full : .partial) : .legacy),
+                                                     kind: flagged ? (full ? .full : .partial) : .legacy,
+                                                     clips: clips),
                                shadow: shadow, full: full, alphas: alphas)
         } catch { fallBackFromRealWindows(error.localizedDescription) }
     }
@@ -5193,7 +5205,13 @@ final class CanvasController {
             guard q.pid == p.pid || (r.intersects(screenRect) && !r.intersection(screenRect).isEmpty) else { continue }
             // Where the canvas draws it: the add-on keeps the native place under the menu bar itself
             // (sunlight-28) and draws the window there from it.
-            kept.append((q, CGRect(origin: nativeOrigin(of: q, at: camera, clamped: false), size: r.size)))
+            let at = CGRect(origin: nativeOrigin(of: q, at: camera, clamped: false), size: r.size)
+            // A window kept on show is real, at 1:1, and no frame clips it: one whose place is past this
+            // display's edge would be on show over a neighbouring display's canvas (the fork's `#6`), and
+            // flash there when the canvas comes back. It stays under the canvas instead — off this
+            // display's screen anyway — and comes back with it, clipped by the frame.
+            guard screenRect.contains(at) else { continue }
+            kept.append((q, at))
         }
         return Array(kept.suffix(LiveWindowsWire.maxKept))
     }
@@ -7943,6 +7961,49 @@ final class CanvasController {
 
     /// Window › Move to Next Display (⌃⌥⇧→; ← for the previous one): on the canvas, the window under the
     /// pointer (or the one used last) goes to that display's canvas; in a window, that window goes.
+    // MARK: Centering the window in view
+
+    /// Settings › Keys & Mouse › Center the window in view, and the window's menu: the window in focus at
+    /// the middle of this display's visible area, so one whose place on the canvas is past the screen's
+    /// edge — over another display's, say — comes into view without the camera moving. From inside a real
+    /// window the canvas comes forward first, as Tidy and Arrange do.
+    func centerInView() {
+        guard !paused, !isSetupShowing, restoring == nil, addingWidgets == nil, !handingOff else { return }
+        guard NSApp.isActive, activeProxy == nil else {
+            pendingPlacement = { [weak self] in self?.centerInView() }
+            show()
+            return
+        }
+        guard let p = tileTarget else { return }
+        centerInView(p)
+    }
+
+    /// `p` at the middle of the part of the canvas on this screen, its size kept: at 1:1 that is the middle
+    /// of the screen. A window bigger than the visible area keeps its top-left in it, as entering one does.
+    /// The camera doesn't move, so the windows around it stay where they are on screen. `strength` is how
+    /// much of the way to the middle it goes, 1 being all of it; a setting for it isn't built yet.
+    func centerInView(_ p: WindowProxy, strength: CGFloat = 1) {
+        guard p.kind == .window, p.away == nil, !p.heldBack, p.pip == nil, proxies[p.windowID] === p else { return }
+        let camera = view.camera
+        let drawn = camera.toScreen(p.worldRect)
+        guard drawn.width.isFinite, drawn.height.isFinite, drawn.width > 0, drawn.height > 0 else { return }
+        let origin = CanvasController.centeredOrigin(of: drawn, in: display.visibleInView, strength: strength)
+        let world = camera.toWorld(origin)
+        guard world.x.isFinite, world.y.isFinite, world != p.worldRect.origin else { return }
+        view.glide([(p, world)])
+        remember()
+    }
+
+    /// Where a window drawn at `drawn` (view points) goes to sit at the middle of `visible`: the middle of
+    /// it, or its top-left when it is bigger than the area (`Handoff.centredOrigin`), `strength` of the way
+    /// there — 0 stays put, 1 is the middle. The pure geometry of Center in View.
+    nonisolated static func centeredOrigin(of drawn: CGRect, in visible: CGRect, strength: CGFloat = 1) -> CGPoint {
+        let middle = Handoff.centredOrigin(of: drawn, in: visible)
+        let weight = max(0, min(1, strength))
+        return CGPoint(x: drawn.minX + (middle.x - drawn.minX) * weight,
+                       y: drawn.minY + (middle.y - drawn.minY) * weight)
+    }
+
     func moveToDisplay(step: Int) {
         guard let desk, desk.canvases.count > 1, addingWidgets == nil, !isSetupShowing, !paused else { return }
         if NSApp.isActive, activeProxy == nil {

@@ -19,10 +19,15 @@ enum LiveWindowsWire {
     static let anchor: UInt8 = 0x79
     static let magic = Data("SUNBEAM1\n".utf8)
     static let maxWindows = 128
+    /// The most windows a clipped frame can carry: a record with its clip is 44 bytes, and the request
+    /// has to stay inside the add-on's 4 KB socket buffer.
+    static let maxClippedWindows = 92
+    /// The most windows one frame can carry: `clips` decides the record size.
+    static func windowLimit(clips: Bool) -> Int { clips ? maxClippedWindows : maxWindows }
     /// The add-on this build carries (LiveWindows/osax/common.h). An older one in the Dock still works,
     /// with what it has; the app asks to reload it once it answers.
 
-    static let additionVersion = "sunlight-57"
+    static let additionVersion = "sunlight-58"
     /// The first add-on that holds a lease per canvas, so that every display's canvas can show live
     /// windows; with an older one only the main display's does, and the others show pictures.
     static let leasePerCanvas = 13
@@ -68,6 +73,12 @@ enum LiveWindowsWire {
     /// gets rounded corners, and its full shape back when it leaves; sunlight-52 and up.
     static let shapesFrom = 52
     static func shapesInDock(_ version: String?) -> Bool { additionNumber(version) >= shapesFrom }
+
+    /// Whether an add-on of this version clips a leased window to its canvas's display (`Window.clip` in
+    /// the frame): sunlight-58 and up. With an older one a window's place on an infinite canvas can fall
+    /// on another display's screen area, where the real window is then drawn over that display's canvas.
+    static let clipsFrom = 58
+    static func clipsInDock(_ version: String?) -> Bool { additionNumber(version) >= clipsFrom }
 
     /// A window's corner radius in its own points (sunlight-52): its shape becomes its bounds with corners
     /// of that radius, 0 its full bounds again. The window needn't be leased.
@@ -147,6 +158,8 @@ enum LiveWindowsWire {
         case legacy
     }
     static let frameFull: UInt8 = 0x01
+    /// Every record carries its clip too (sunlight-58): 44 bytes instead of 28.
+    static let frameClips: UInt8 = 0x02
 
     static func pack<T>(_ value: T, into data: inout Data) {
         var value = value
@@ -260,6 +273,16 @@ enum LiveWindowsWire {
     struct Window: Equatable {
         let id: CGWindowID
         let transform: CGAffineTransform
+        /// Where the window's frame is drawn on screen (global points), and the scale the transform
+        /// undoes: what `clip` is worked out from, worked out once here.
+        let drawn: CGRect
+        let scale: CGSize
+        /// The part of the window's own points that lands on its canvas's display, when the window is
+        /// clipped (sunlight-58): its whole bounds when it's all on the display, a smaller rect when it
+        /// hangs over the edge, an empty one when none of it is. Nil when the window's shape is
+        /// something else — a Picture in Picture tile's, its rounded corners — or when nothing asks for
+        /// a clip: the add-on then leaves the shape alone.
+        let clip: CGRect?
 
         /// SkyLight stores the inverse mapping: screen points -> unscaled window-local points.
         /// Native identity is a translation by minus the window's real origin, not .identity.
@@ -267,7 +290,13 @@ enum LiveWindowsWire {
         /// opening or closing, see `WindowEffect`); the inverse scale and the translation follow. Only
         /// positive, axis-aligned scales: the addition takes nothing else. Never so small that the
         /// inverse passes 100, which the addition rejects (`minimumScale`).
-        init(id: CGWindowID, worldRect: CGRect, inset: CGFloat, camera: Camera, effect: WindowEffect.Frame = .identity) {
+        ///
+        /// `display` (global) is the display the window's canvas covers: with it the record carries the
+        /// part of the window's own points still on that display, so the window can't be drawn over
+        /// another one. A canvas's world is global (`Display`), so a window's place — and a window
+        /// parked at a stale one — can otherwise fall on another display's screen area.
+        init(id: CGWindowID, worldRect: CGRect, inset: CGFloat, camera: Camera,
+             effect: WindowEffect.Frame = .identity, display: CGRect? = nil) {
             self.id = id
             var target = camera.toScreen(worldRect.insetBy(dx: -inset, dy: -inset))
             var sx = camera.zoom, sy = camera.zoom
@@ -281,24 +310,48 @@ enum LiveWindowsWire {
             }
             let ix = 1 / sx, iy = 1 / sy
             transform = CGAffineTransform(a: ix, b: 0, c: 0, d: iy, tx: -target.minX * ix, ty: -target.minY * iy)
+            drawn = target
+            scale = CGSize(width: sx, height: sy)
+            clip = Window.clip(of: target, scale: CGSize(width: sx, height: sy), on: display)
         }
 
         /// The smallest on-screen scale sent: its inverse stays inside the addition's limit of 100.
         static let minimumScale: CGFloat = 0.0125
+
+        /// The window's own points whose drawing lands inside `display`: its whole bounds when it is
+        /// all on the display, the part that is when it hangs over an edge, an empty rect when none of
+        /// it is (a window out in another display's part of the canvas, which must draw nowhere).
+        /// `drawn` is the window's frame where it is drawn; `scale`, the scale it is drawn at.
+        nonisolated static func clip(of drawn: CGRect, scale: CGSize, on display: CGRect?) -> CGRect? {
+            guard let display, scale.width > 0, scale.height > 0,
+                  drawn.width.isFinite, drawn.height.isFinite else { return nil }
+            let onScreen = drawn.intersection(display)
+            guard !onScreen.isNull, !onScreen.isEmpty else { return .zero }
+            let local = CGRect(x: 0, y: 0, width: drawn.width / scale.width, height: drawn.height / scale.height)
+            let visible = CGRect(x: (onScreen.minX - drawn.minX) / scale.width,
+                                 y: (onScreen.minY - drawn.minY) / scale.height,
+                                 width: onScreen.width / scale.width,
+                                 height: onScreen.height / scale.height)
+            return visible.intersection(local)
+        }
     }
 
     /// `above`: in an empty frame (every window released), the app that has the front, if one took it
     /// while the canvas was up: an add-on from sunlight-11 brings the canvas down under its windows.
+    /// `clips`: every record carries its clip (sunlight-58), the part of the window's own points to draw
+    /// (`Window.clip`); a record without one carries a negative width, which the add-on takes as "leave
+    /// the shape alone". Records are 44 bytes then instead of 28, so fewer windows fit in a frame.
     static func snapshot(_ windows: [Window], backdrop: CGWindowID, overlay: CGWindowID,
-                         kind: FrameKind = .legacy, above pid: pid_t = 0) throws -> Data {
-        guard windows.count <= maxWindows, Set(windows.map(\.id)).count == windows.count else {
+                         kind: FrameKind = .legacy, above pid: pid_t = 0, clips: Bool = false) throws -> Data {
+        let clipped = clips && kind != .legacy
+        guard windows.count <= windowLimit(clips: clipped), Set(windows.map(\.id)).count == windows.count else {
             throw LiveWindowsError.protocolError("Too many or duplicate live windows")
         }
         var data = Data()
         pack(backdrop, into: &data); pack(overlay, into: &data); pack(UInt16(windows.count), into: &data)
         switch kind {
-        case .full: data.append(frameFull)
-        case .partial: data.append(0)
+        case .full: data.append(frameFull | (clipped ? frameClips : 0))
+        case .partial: data.append(clipped ? frameClips : 0)
         case .legacy: break
         }
         if windows.isEmpty, kind != .legacy, pid != 0 { pack(Int32(pid), into: &data) }
@@ -313,6 +366,22 @@ enum LiveWindowsWire {
                     throw LiveWindowsError.protocolError("Invalid window transform")
                 }
                 pack(Float(value), into: &data)
+            }
+            if clipped {
+                // A negative width is "leave the shape alone" (a tile's corners are its own); an empty
+                // rect is a window on no display, which the add-on draws as a single point of itself.
+                let values: [CGFloat]
+                if let clip = window.clip {
+                    values = [clip.minX, clip.minY, clip.width, clip.height]
+                } else {
+                    values = [0, 0, -1, 0]
+                }
+                for value in values {
+                    guard value.isFinite, Float(value).isFinite else {
+                        throw LiveWindowsError.protocolError("Invalid window clip")
+                    }
+                    pack(Float(value), into: &data)
+                }
             }
         }
         return message(frame, data)

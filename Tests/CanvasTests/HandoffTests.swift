@@ -128,6 +128,36 @@ final class HandoffTests: XCTestCase {
         XCTAssertEqual(fixing.toScreen(window.origin), CGPoint(x: -200, y: 100))
     }
 
+    // MARK: Center in View
+
+    func testCenteringInViewPutsTheWindowAtTheMiddleOfTheVisibleArea() {
+        // A window drawn at (300, 200), 800×600, on the 2000-wide visible area (38 pt in): its middle is
+        // (700, 500), the area's is (1000, 619), so it goes 300 pt right and 119 down.
+        let drawn = CGRect(x: 300, y: 200, width: 800, height: 600)
+        let origin = CanvasController.centeredOrigin(of: drawn, in: visible)
+        XCTAssertEqual(origin.x, 600, accuracy: 0.001)
+        XCTAssertEqual(origin.y, 319, accuracy: 0.001)
+        // Already there: nothing to do.
+        let middle = CGRect(x: 600, y: 319, width: 800, height: 600)
+        XCTAssertEqual(CanvasController.centeredOrigin(of: middle, in: visible).x, 600, accuracy: 0.001)
+        // A window bigger than the area keeps its top-left in it, as entering one does.
+        let big = CGRect(x: 100, y: 100, width: 2400, height: 1400)
+        XCTAssertEqual(CanvasController.centeredOrigin(of: big, in: visible), CGPoint(x: 0, y: 38))
+    }
+
+    func testCenteringInViewGoesOnlyAsFarAsItsStrengthSays() {
+        let drawn = CGRect(x: 300, y: 200, width: 800, height: 600)
+        let middle = CanvasController.centeredOrigin(of: drawn, in: visible)
+        // Halfway there, the window's origin is halfway between where it was and the middle.
+        let half = CanvasController.centeredOrigin(of: drawn, in: visible, strength: 0.5)
+        XCTAssertEqual(half.x, (drawn.minX + middle.x) / 2, accuracy: 0.001)
+        XCTAssertEqual(half.y, (drawn.minY + middle.y) / 2, accuracy: 0.001)
+        // Out of range is clamped: 0 is where it was, 1 the middle.
+        XCTAssertEqual(CanvasController.centeredOrigin(of: drawn, in: visible, strength: 0), drawn.origin)
+        XCTAssertEqual(CanvasController.centeredOrigin(of: drawn, in: visible, strength: 2), middle)
+        XCTAssertEqual(CanvasController.centeredOrigin(of: drawn, in: visible, strength: -1), drawn.origin)
+    }
+
     func testACameraSeenFromGlobalAndBack() {
         let view = Camera(origin: CGPoint(x: 100, y: 200), zoom: 0.5)
         let display = CGPoint(x: -2000, y: 300)

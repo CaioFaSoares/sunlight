@@ -21,7 +21,10 @@
 // A frame's flags byte (since sunlight-8; a frame without one is taken the old way). Full: level and
 // stacking are asserted for every window in it, and a leased window absent from it is put back. Without
 // it the frame is partial: only transforms, only for the windows in it, and the rest stay as they are.
+// Clips (since sunlight-58): every record carries, after its transform, the part of the window's own
+// points still on its canvas's display (four floats); records are 44 bytes then, not 28.
 #define SUNBEAM_FRAME_FULL 0x01
+#define SUNBEAM_FRAME_CLIPS 0x02
 
 extern CGError SLSGetWindowLevel(int cid, uint32_t wid, int *level);
 extern CGError SLSSetWindowLevel(int cid, uint32_t wid, int level);
@@ -176,7 +179,7 @@ static double sunbeam_now(void)
     gettimeofday(&tv, NULL);
     return tv.tv_sec + tv.tv_usec / 1e6;
 }
-struct sunbeam_record { uint32_t wid; float matrix[6]; };
+struct sunbeam_record { uint32_t wid; float matrix[6]; float clip[4]; bool has_clip; };
 // Every request, from whichever lease, is applied under this lock, one at a time; it also guards the
 // count below. `sunbeam_status` identifies the failed stage in an acknowledgment.
 static pthread_mutex_t sunbeam_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -585,6 +588,108 @@ static uint8_t sunbeam_shape_set(const char *bytes, int length)
     return 0;
 }
 
+// MARK: Clips
+//
+// A canvas draws the windows of one display (`Display`), but it places them in global coordinates:
+// a window whose place is past the canvas's edge is over a neighbouring display's screen, where its
+// real window was drawn over that canvas and stayed there when the camera came back (the fork's #6).
+// Since sunlight-58 a frame carries, per window, the part of the window's own points that is still on
+// its canvas's display — the whole bounds when it is all on it, less when it hangs over the edge, a
+// negative width when its shape is not the canvas's to set (a tile's corners), which leaves the shape
+// alone — and the window's shape is set to exactly that. Everything else about the window is the
+// canvas's as before. The window's own shape goes back when it is put back, handed off, or its lease
+// ends, so a window used at 1:1 is never clipped to where it was on a canvas.
+//
+// The shape is the window server's, in the window's own points, with the bounds' origin as the
+// offsets (`sunbeam_shape_apply`). It is a property of the window that stays until something changes
+// it, so these entries remember what was set: a frame repeating it costs nothing.
+struct sunbeam_clipped { uint32_t wid; int owner; float clip[4]; bool set; };
+static struct sunbeam_clipped sunbeam_clipped_list[SUNBEAM_LIMIT];
+static int sunbeam_clipped_next;
+
+static bool sunbeam_clip_available(void)
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpointer-bool-conversion"   // weak symbols: real checks in the add-on
+    return CGSNewRegionWithRect && SLSSetWindowShape;
+#pragma clang diagnostic pop
+}
+
+static struct sunbeam_clipped *sunbeam_clip_find(uint32_t wid, int owner)
+{
+    for (int i = 0; i < SUNBEAM_LIMIT; ++i) {
+        if (sunbeam_clipped_list[i].wid == wid && sunbeam_clipped_list[i].owner == owner) return &sunbeam_clipped_list[i];
+    }
+    return NULL;
+}
+
+/// Whether the window's shape is already `clip`.
+static bool sunbeam_clip_matches(uint32_t wid, int owner, const float clip[4])
+{
+    struct sunbeam_clipped *clipped = sunbeam_clip_find(wid, owner);
+    if (!clipped || !clipped->set) return false;
+    for (int i = 0; i < 4; ++i) if (fabsf(clipped->clip[i] - clip[i]) > 0.01f) return false;
+    return true;
+}
+
+/// Drops what is remembered about the window's shape: the canvas's next frame sets it again. For a
+/// window given another shape (a tile's corners) or one this add-on won't hear of again.
+static void sunbeam_clip_forget(uint32_t wid)
+{
+    for (int i = 0; i < SUNBEAM_LIMIT; ++i) {
+        if (sunbeam_clipped_list[i].wid != wid) continue;
+        sunbeam_clipped_list[i].wid = 0;
+        sunbeam_clipped_list[i].set = false;
+    }
+}
+
+/// The window's drawing clipped to `clip` (its own points), when that isn't what it has. A rect of
+/// nothing, or one the window's bounds don't meet, is drawn as a single point at the window's own
+/// top-left: a window off its display keeps its place, its level and its lease, but has no pixel on
+/// any display — it used to be drawn on the other display's. False when the window is gone or the
+/// window server refused; nothing is remembered then, so the next frame asks again.
+static bool sunbeam_clip_apply(int cid, uint32_t wid, int owner, const float clip[4])
+{
+    if (!sunbeam_clip_available() || sunbeam_clip_matches(wid, owner, clip)) return true;
+    CGRect bounds;
+    if (SLSGetWindowBounds(cid, wid, &bounds) != kCGErrorSuccess) return false;
+    CGRect rect = CGRectIntersection(CGRectMake(clip[0], clip[1], clip[2], clip[3]),
+                                     CGRectMake(0, 0, bounds.size.width, bounds.size.height));
+    if (CGRectIsNull(rect) || rect.size.width < 0.5 || rect.size.height < 0.5) rect = CGRectMake(0, 0, 1, 1);
+    CFTypeRef region = NULL;
+    if (CGSNewRegionWithRect(&rect, &region) != kCGErrorSuccess || !region) return false;
+    CGError error = SLSSetWindowShape(cid, wid, (float)bounds.origin.x, (float)bounds.origin.y, region);
+    CFRelease(region);
+    if (error != kCGErrorSuccess) return false;
+    struct sunbeam_clipped *clipped = sunbeam_clip_find(wid, owner);
+    if (!clipped) {
+        for (int i = 0; i < SUNBEAM_LIMIT && !clipped; ++i) if (!sunbeam_clipped_list[i].wid) clipped = &sunbeam_clipped_list[i];
+        if (!clipped) {
+            clipped = &sunbeam_clipped_list[sunbeam_clipped_next];
+            sunbeam_clipped_next = (sunbeam_clipped_next + 1) % SUNBEAM_LIMIT;
+        }
+        clipped->wid = wid;
+        clipped->owner = owner;
+    }
+    memcpy(clipped->clip, clip, sizeof(float) * 4);
+    clipped->set = true;
+    return true;
+}
+
+/// The window's own shape back, and the clip forgotten: the window is being put back under the
+/// canvas, handed off, or on show as itself (a tile keeps its corners, which isn't a clip).
+static void sunbeam_clip_reset(uint32_t wid, int owner)
+{
+    struct sunbeam_clipped *clipped = sunbeam_clip_find(wid, owner);
+    if (!clipped) return;
+    bool set = clipped->set;
+    clipped->wid = 0;
+    clipped->set = false;
+    if (!set || !sunbeam_clip_available() || !sunbeam_shape_available()) return;
+    int current = 0;
+    if (SLSGetWindowOwner(SLSMainConnectionID(), wid, &current) == kCGErrorSuccess && current == owner) sunbeam_shape_apply(wid, 0);
+}
+
 // MARK: Release
 
 /// Puts a window back as the add-on found it: its place in the stacking order, its transform, and
@@ -640,6 +745,9 @@ static void sunbeam_restore(CFTypeRef transaction, struct sunbeam_saved *saved, 
         sunbeam_transform(transaction, cid, saved->wid, saved->transform);
         sunbeam_shadow_reset(saved->wid, saved->owner);
         sunbeam_alpha_reset(saved);
+        // Its own shape back, now that it is out of sight under the canvas: a window put back is never
+        // clipped to where it was on its canvas.
+        sunbeam_clip_reset(saved->wid, saved->owner);
     }
 }
 
@@ -693,6 +801,7 @@ static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, doubl
             if (sunbeam_transaction_end(transaction)) {
                 sunbeam_shadow_reset(saved->wid, saved->owner);
                 sunbeam_alpha_reset(saved);
+                sunbeam_clip_reset(saved->wid, saved->owner);
                 return;
             }
         }
@@ -701,6 +810,7 @@ static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, doubl
     sunbeam_transform(NULL, cid, saved->wid, saved->transform);
     sunbeam_shadow_reset(saved->wid, saved->owner);
     sunbeam_alpha_reset(saved);
+    sunbeam_clip_reset(saved->wid, saved->owner);
 }
 
 /// Native sizes a frame later (sunlight-23). The window server takes an order a cycle after a
@@ -1097,7 +1207,10 @@ static void sunbeam_release_all(struct sunbeam_saved *saved, int count, uint32_t
     // shape too (sunlight-52) unless it stays on show as a tile.
     for (int i = 0; i < count; ++i) {
         sunbeam_alpha_reset(&saved[i]);
-        if (!pinned[i]) sunbeam_shape_reset(saved[i].wid);
+        if (!pinned[i]) {
+            sunbeam_shape_reset(saved[i].wid);
+            sunbeam_clip_reset(saved[i].wid, saved[i].owner);
+        }
     }
 }
 
@@ -1118,24 +1231,34 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
     memcpy(&backdrop, bytes, 4); memcpy(&overlay, bytes + 4, 4); memcpy(&count, bytes + 8, 2);
     if (count > SUNBEAM_LIMIT) return false;
     // An empty frame may carry, after its flags byte, the pid of the app that has the front (sunlight-11).
+    // A flagged frame's records are 28 bytes each, or 44 when the flag says each carries a clip too
+    // (sunlight-58); a frame without the flag byte is the old way, 28.
     bool has_above = count == 0 && length == 15;
-    bool has_flags = has_above || length == 11 + count * 28;
+    bool has_flags = has_above || length == 11 + count * 28 || length == 11 + count * 44;
     if (!has_flags && length != 10 + count * 28) return false;
     uint8_t flags = has_flags ? (uint8_t)bytes[10] : 0;
+    bool clipped = has_flags && count > 0 && (flags & SUNBEAM_FRAME_CLIPS) && length == 11 + count * 44;
+    int stride = clipped ? 44 : 28;
     int above_pid = 0;
     if (has_above) memcpy(&above_pid, bytes + 11, 4);
     int base = has_flags ? 11 : 10;
     if (count && (!backdrop || !overlay || backdrop == overlay)) return false;
     struct sunbeam_record records[SUNBEAM_LIMIT];
     for (int i = 0; i < count; ++i) {
-        memcpy(&records[i].wid, bytes + base + i * 28, 4);
-        memcpy(records[i].matrix, bytes + base + 4 + i * 28, 24);
+        memcpy(&records[i].wid, bytes + base + i * stride, 4);
+        memcpy(records[i].matrix, bytes + base + 4 + i * stride, 24);
         if (!records[i].wid || records[i].wid == backdrop || records[i].wid == overlay) return false;
         for (int j = 0; j < i; ++j) if (records[j].wid == records[i].wid) return false;
         float *m = records[i].matrix;
         for (int j = 0; j < 6; ++j) if (!isfinite(m[j])) return false;
         // This extension deliberately exposes only positive scale + translation, the canvas's needs.
         if (m[0] < 0.01f || m[0] > 100.0f || m[3] < 0.01f || m[3] > 100.0f || m[1] || m[2]) return false;
+        records[i].has_clip = clipped;
+        if (!clipped) continue;
+        memcpy(records[i].clip, bytes + base + 28 + i * stride, 16);
+        float *c = records[i].clip;
+        for (int j = 0; j < 4; ++j) if (!isfinite(c[j])) return false;
+        if (c[2] < -1.0f || c[3] < 0.0f) return false;
     }
     double now = sunbeam_now();
     bool full;
@@ -1163,14 +1286,18 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
         }
     }
     if (!full) {
-        // Only transforms, only the ones that changed, all in one transaction when there is one.
+        // Only transforms and clips, only the windows whose own changed, all in one transaction when
+        // there is one.
         int changed[SUNBEAM_LIMIT], changed_count = 0;
         for (int i = 0; i < count; ++i) {
             for (int j = 0; j < *saved_count; ++j) {
                 if (saved[j].wid != records[i].wid) continue;
                 float *m = records[i].matrix;
                 CGAffineTransform t = CGAffineTransformMake(m[0], m[1], m[2], m[3], m[4], m[5]);
-                if (!CGAffineTransformEqualToTransform(t, saved[j].applied)) changed[changed_count++] = i;
+                bool differ = !CGAffineTransformEqualToTransform(t, saved[j].applied);
+                if (records[i].has_clip && records[i].clip[2] >= 0)
+                    differ = differ || !sunbeam_clip_matches(records[i].wid, saved[j].owner, records[i].clip);
+                if (differ) changed[changed_count++] = i;
             }
         }
         if (!changed_count) return true;   // nothing to do: no update freeze, no window-server calls
@@ -1192,9 +1319,15 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
                 if (index < 0 || !sunbeam_owner_matches(&saved[index])) continue;
                 float *m = records[i].matrix;
                 CGAffineTransform t = CGAffineTransformMake(m[0], m[1], m[2], m[3], m[4], m[5]);
-                CGError error = sunbeam_transform(transaction, cid, records[i].wid, t);
-                if (!transaction && error != kCGErrorSuccess) { sunbeam_status = 3; ok = false; }
-                else saved[index].applied = t;
+                if (!CGAffineTransformEqualToTransform(t, saved[index].applied)) {
+                    CGError error = sunbeam_transform(transaction, cid, records[i].wid, t);
+                    if (!transaction && error != kCGErrorSuccess) { sunbeam_status = 3; ok = false; break; }
+                    saved[index].applied = t;
+                }
+                // The clip in the window's own points, so it lands with the transform in the same
+                // screen update: a shape is a call of its own, not one a transaction carries.
+                if (records[i].has_clip && records[i].clip[2] >= 0)
+                    sunbeam_clip_apply(cid, records[i].wid, saved[index].owner, records[i].clip);
             }
             if (!transaction) { SLSReenableUpdate(cid); return ok; }
             if (sunbeam_transaction_end(transaction)) return true;
@@ -1307,6 +1440,10 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
             if (sunbeam_transform(transaction, cid, wid, t) != kCGErrorSuccess && !transaction) { sunbeam_status = 3; ok = false; break; }
             saved[index].applied = t;
             saved[index].has_applied = true;
+            // The canvas's display, in the window's own points (sunlight-58): one call of its own, made
+            // with the transform it goes with, so a window can't be drawn past its display for a frame.
+            if (records[i].has_clip && records[i].clip[2] >= 0)
+                sunbeam_clip_apply(cid, wid, saved[index].owner, records[i].clip);
             if (!transaction && sunbeam_level(NULL, cid, wid, SUNBEAM_LEVEL, &changed) != kCGErrorSuccess) { sunbeam_status = 4; ok = false; break; }
             if (!place[i]) continue;
             if (transaction) sunbeam_order(transaction, cid, wid, 1, previous);
@@ -1606,8 +1743,12 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
         for (int k = 0; k < kept_count; ++k) sunbeam_place_later(saved[kept[k].index].wid, saved[kept[k].index].owner, kept[k].point, kept[k].drawn);
     }
     // Its full shape back (sunlight-52), should the canvas not have asked for it before the handoff: a
-    // window used at 1:1 has its own corners.
+    // window used at 1:1 has its own corners. And its own bounds as its shape (sunlight-58): a window
+    // used at 1:1 must not be clipped to the part of it a canvas had on that canvas's display. The
+    // windows kept on show with it are at their native place too.
     sunbeam_shape_reset(wid);
+    if (entered >= 0) sunbeam_clip_reset(wid, saved[entered].owner);
+    for (int k = 0; k < kept_count; ++k) sunbeam_clip_reset(saved[kept[k].index].wid, saved[kept[k].index].owner);
     // Levels changed in a transaction: the orders once more, directly, in case the window server took
     // them before the levels (see `sunbeam_release_all`). A no-op when it didn't.
     if (changed) {
@@ -1686,6 +1827,15 @@ static uint8_t sunbeam_anchor_set(const char *bytes, int length, struct sunbeam_
     if (fabs(entry->transform.a - 1) < 1e-3 && fabs(entry->transform.d - 1) < 1e-3) {
         entry->transform = CGAffineTransformMakeTranslation(-landed->x, -landed->y);
     }
+    // The window moved natively under the picture: its clip is in its own points but its shape is
+    // anchored to the bounds' origin, which just moved, so it is set again from them (sunlight-58).
+    struct sunbeam_clipped *clipped = sunbeam_clip_find(wid, entry->owner);
+    if (clipped && clipped->set) {
+        float clip[4];
+        memcpy(clip, clipped->clip, sizeof(clip));
+        sunbeam_clip_forget(wid);   // the shape is the same, its place isn't: set it again
+        sunbeam_clip_apply(cid, wid, entry->owner, clip);
+    }
     return status;
 }
 
@@ -1737,7 +1887,9 @@ static void *sunbeam_session(void *context)
             continue;
         } else if ((uint8_t)bytes[0] == SUNBEAM_SHAPE && length == 9) {
             // A tile's rounded corners (sunlight-52): cosmetic, answered with its status, the lease goes on.
+            // The shape isn't the canvas's clip any more (sunlight-58): the next frame sets it again.
             uint8_t status = sunbeam_shape_set(bytes + 1, length - 1);
+            if (status == 0) { uint32_t wid; memcpy(&wid, bytes + 1, 4); sunbeam_clip_forget(wid); }
             pthread_mutex_unlock(&sunbeam_lock);
             if (send(fd, &status, 1, 0) != 1) break;
             continue;

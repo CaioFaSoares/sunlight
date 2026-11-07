@@ -59,6 +59,8 @@ final class CanvasView: NSView {
     var onHideApp: ((WindowProxy) -> Void)?
     /// Right-click › Picture in Picture / Leave Picture in Picture (`PictureInPicture`).
     var onTogglePip: ((WindowProxy) -> Void)?
+    /// Center in View, from a window's menu: the window at the middle of what's on screen (`CanvasController.centerInView`).
+    var onCenterInView: ((WindowProxy) -> Void)?
     /// A tile dragged, resized or pinched and settled (in a corner, or tucked): its place changed.
     var onPipMoved: ((WindowProxy) -> Void)?
     /// A double-click on a tile: the window returns to 1:1 where the tile is, the camera staying put.
@@ -2416,6 +2418,12 @@ final class CanvasView: NSView {
                                             represent: { TileChoice(proxy: proxy, preset: $0) }) {
             menu.addItem(item)
         }
+        // Bring it to the middle of the screen without entering it: for a window whose place on the canvas
+        // is past the screen's edge, or over another display's. The camera stays where it is.
+        let center = NSMenuItem(title: "Center in View", action: #selector(centerInView(_:)), keyEquivalent: "")
+        center.target = self
+        center.representedObject = proxy
+        menu.addItem(center)
         menu.addItem(.separator())
         if proxy.showsPolarity, let pole = proxy.polarity {
             let flip = NSMenuItem(title: "Flip Polarity (now \(pole.glyph))", action: #selector(flipPolarity(_:)), keyEquivalent: "")
@@ -2466,6 +2474,11 @@ final class CanvasView: NSView {
     @objc private func togglePip(_ sender: NSMenuItem) {
         guard let p = sender.representedObject as? WindowProxy else { return }
         onTogglePip?(p)
+    }
+
+    @objc private func centerInView(_ sender: NSMenuItem) {
+        guard let p = sender.representedObject as? WindowProxy else { return }
+        onCenterInView?(p)
     }
 
     @objc private func minimizeWindow(_ sender: NSMenuItem) {

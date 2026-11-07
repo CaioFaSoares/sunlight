@@ -42,16 +42,23 @@ static CGPoint moved_to[10];
 CGError SLSTransactionMoveWindowWithGroup(CFTypeRef t, uint32_t w, CGPoint p) { transforms[w] = CGAffineTransformMakeTranslation(-p.x, -p.y); if (w < 10) { txn_moves[w]++; moved_to[w] = p; } return 0; }
 CGError SLSGetWindowBounds(int c, uint32_t w, CGRect *f) { *f = CGRectMake(-transforms[w].tx, -transforms[w].ty, 400, 300); return 0; }
 // Shapes (sunlight-52): a region is faked as its rectangle count, and what each window was last shaped to.
-static int shape_rects[10], shape_sets[10]; static CGPoint shape_at[10];
-CGError CGSNewRegionWithRect(const CGRect *r, CFTypeRef *out) { int one = 1; *out = CFNumberCreate(NULL, kCFNumberIntType, &one); return 0; }
+// A one-rectangle region keeps the rectangle too, so a clip (sunlight-58) can be read back.
+static int shape_rects[10], shape_sets[10]; static CGPoint shape_at[10]; static CGRect shape_rect[10];
+static CGRect last_region; static bool last_region_single;
+CGError CGSNewRegionWithRect(const CGRect *r, CFTypeRef *out) {
+    int one = 1; last_region = *r; last_region_single = true; *out = CFNumberCreate(NULL, kCFNumberIntType, &one); return 0;
+}
 CGError CGSNewRegionWithRectList(const CGRect *r, int n, CFTypeRef *out) {
     for (int i = 0; i < n; ++i) assert(r[i].size.width > 0 && r[i].size.height > 0 && r[i].origin.x >= 0 && r[i].origin.y >= 0);
+    last_region_single = n == 1; if (n == 1) last_region = r[0];
     *out = CFNumberCreate(NULL, kCFNumberIntType, &n); return 0;
 }
 CGError SLSSetWindowShape(int c, uint32_t w, float x, float y, CFTypeRef region) {
     if (w >= 10) return kCGErrorFailure;
     int n = 0; CFNumberGetValue(region, kCFNumberIntType, &n);
-    shape_rects[w] = n; shape_sets[w]++; shape_at[w] = CGPointMake(x, y); return 0;
+    shape_rects[w] = n; shape_sets[w]++; shape_at[w] = CGPointMake(x, y);
+    if (last_region_single && n == 1) shape_rect[w] = last_region;
+    return 0;
 }
 // What the window server answers about a window's shadow (the active look's density and offset), and
 // the looks written to it.
@@ -123,6 +130,20 @@ static void send_flagged(int fd, const uint32_t *wids, int count, uint8_t flags,
     for (int i = 0; i < count; ++i) {
         float transform[6] = {scale, 0, 0, scale, -400, -200};
         memcpy(bytes + 14 + i * 28, &wids[i], 4); memcpy(bytes + 18 + i * 28, transform, 24);
+    }
+    assert(send(fd, bytes, 2 + length, 0) == 2 + length);
+    uint8_t status; assert(sunbeam_read(fd, &status, 1)); assert(status == 0);
+}
+// A flagged frame whose records carry a clip too (sunlight-58): 44 bytes each, the clip in the window's
+// own points after the transform. A negative width is "leave the window's shape alone" (a tile's).
+static void send_clipped(int fd, const uint32_t *wids, const float (*clips)[4], int count, uint8_t flags, float scale) {
+    char bytes[3 + 11 + 44 * 8]; int16_t length = 1 + 11 + 44 * count; uint32_t backdrop = 1, overlay = 2; uint16_t n = count;
+    memcpy(bytes, &length, 2); bytes[2] = SUNBEAM_FRAME;
+    memcpy(bytes + 3, &backdrop, 4); memcpy(bytes + 7, &overlay, 4); memcpy(bytes + 11, &n, 2); bytes[13] = flags | SUNBEAM_FRAME_CLIPS;
+    for (int i = 0; i < count; ++i) {
+        float transform[6] = {scale, 0, 0, scale, -400, -200};
+        memcpy(bytes + 14 + i * 44, &wids[i], 4); memcpy(bytes + 18 + i * 44, transform, 24);
+        memcpy(bytes + 42 + i * 44, clips[i], 16);
     }
     assert(send(fd, bytes, 2 + length, 0) == 2 + length);
     uint8_t status; assert(sunbeam_read(fd, &status, 1)); assert(status == 0);
@@ -560,9 +581,51 @@ int main(void) {
     assert(shape_rects[5] == 1 && shape_at[5].x == 50 && shape_at[5].y == 60);
     assert(CGAffineTransformEqualToTransform(transforms[4], original) && levels[4] == -10);
 
+    // Clips (sunlight-58): a window's shape is the part of its own points still on its canvas's display,
+    // so a window placed over another display's screen area is drawn on neither, and a window used at
+    // 1:1 gets its own shape back.
+    transforms[4] = CGAffineTransformMakeTranslation(-400, -200); levels[4] = -10;
+    fd = start(&thread);
+    {
+        uint32_t solo4[1] = {4};
+        float visible[1][4] = {{10, 20, 50, 60}};
+        send_clipped(fd, solo4, visible, 1, SUNBEAM_FRAME_FULL, 1);
+        assert(shape_rects[4] == 1 && shape_rect[4].origin.x == 10 && shape_rect[4].origin.y == 20);
+        assert(shape_rect[4].size.width == 50 && shape_rect[4].size.height == 60);
+        assert(shape_at[4].x == 400 && shape_at[4].y == 200);   // in its own points, at its native place
+        // The same clip in a partial frame: the transform moves, the shape is already right.
+        int sets = shape_sets[4];
+        send_clipped(fd, solo4, visible, 1, 0, 2);
+        assert(transforms[4].a == 2 && shape_sets[4] == sets);
+        // Another clip is set again.
+        float narrower[1][4] = {{120, 20, 30, 60}};
+        send_clipped(fd, solo4, narrower, 1, 0, 2);
+        assert(shape_rect[4].origin.x == 120 && shape_rect[4].size.width == 30);
+        // A negative width leaves the shape alone (a tile's corners are its own).
+        sets = shape_sets[4];
+        float tile[1][4] = {{0, 0, -1, 0}};
+        send_clipped(fd, solo4, tile, 1, 0, 2);
+        assert(shape_sets[4] == sets);
+        // A window on no display at all: one point at its own top-left, no pixel of it anywhere.
+        float away[1][4] = {{0, 0, 0, 0}};
+        send_clipped(fd, solo4, away, 1, 0, 2);
+        assert(shape_rect[4].size.width == 1 && shape_rect[4].size.height == 1);
+        // Corners for a tile replace the clip; the canvas's next frame sets the clip again.
+        assert(send_shape(fd, 4, 12) == 0 && shape_rects[4] == 25);
+        sets = shape_sets[4];
+        send_clipped(fd, solo4, away, 1, 0, 2);
+        assert(shape_sets[4] == sets + 1 && shape_rect[4].size.width == 1);
+        // Put back: the window's own shape again, its whole bounds.
+        send_above(fd, 0);
+        assert(shape_rect[4].size.width == 400 && shape_rect[4].size.height == 300);
+        assert(shape_rects[4] == 1 && shape_at[4].x == 400 && shape_at[4].y == 200);
+    }
+    close(fd); pthread_join(thread, NULL);
+    transforms[4] = original; levels[4] = -10;
+
     fd = start(&thread); send_frame(fd, 4, false);
     // No heartbeat: Dock restores on the three-second lease timeout even if the client hangs.
     pthread_join(thread, NULL); close(fd);
     assert(CGAffineTransformEqualToTransform(transforms[4], original) && levels[4] == -10);
-    puts("PASS: fragmented frames, windows put back at native size only after the commit, disconnect, invalid transform, two leases at once, window alpha (leased only, relative, back on release, handoff and a full frame leaving it out), handoff (leased, unleased, missing, keeping windows on show, native places stopped at the menu bar), shadows (eased both ways, refused, cut short), flagged frames (partial, keepalive, full, app in front), the canvas lifted and lowered, a window minimized while leased never ordered, lease expiry, pinned windows (on show through a handoff and a release for an app in front, raised before the windows that come up under them, taken back by a frame, put back at the lease's end), shapes (rounded corners as rows at the native place, refused, put back on request and at the lease's end), unmanaged isolation");
+    puts("PASS: fragmented frames, windows put back at native size only after the commit, disconnect, invalid transform, two leases at once, window alpha (leased only, relative, back on release, handoff and a full frame leaving it out), handoff (leased, unleased, missing, keeping windows on show, native places stopped at the menu bar), shadows (eased both ways, refused, cut short), flagged frames (partial, keepalive, full, app in front), the canvas lifted and lowered, a window minimized while leased never ordered, lease expiry, pinned windows (on show through a handoff and a release for an app in front, raised before the windows that come up under them, taken back by a frame, put back at the lease's end), shapes (rounded corners as rows at the native place, refused, put back on request and at the lease's end), clips to its canvas's display (set once per change, left alone for a tile, back at the lease's end), unmanaged isolation");
 }

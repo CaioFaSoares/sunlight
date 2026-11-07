@@ -212,6 +212,7 @@ final class Desk {
             guard NSApp.isActive else { break }
             if overview != nil { endOverview() }
             else if let c = canvases.first(where: { $0.lastEnteredID != nil }) { c.enterLastWindow() }
+        case .centerInView: current.centerInView()
         case .zoomIn: current.zoomCanvas(by: 1.25)
         case .zoomOut: current.zoomCanvas(by: 0.8)
         }

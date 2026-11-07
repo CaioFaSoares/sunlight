@@ -57,6 +57,42 @@ had that window returns into it after restoring the others. The same path is use
 configured Show Overview/Toggle actions and the four-finger See All gesture. A single-display setup
 keeps the old behaviour.
 
+### #6 — Every display's windows keep to it
+
+Each canvas places its windows in the desk's global coordinates (`Display`), but covers one display. A
+window whose canvas place was past that display's edge therefore landed on a neighbouring display's
+screen: the live renderer drew the real window there — at the canvas level, in that display's stacking
+order — so it showed over the other canvas, and came back cut, stuck or occluded when the camera came
+back. Capture proxies never showed it: they are subviews of their own canvas window. The parking margin
+(one screen around the view) left such windows live, and with the display to the left or right of the
+main one, a horizontal row of windows on the canvas walked straight into it.
+
+A live frame now carries, per window, the part of the window's own points that is still on its canvas's
+display (add-on sunlight-58, `SUNBEAM_FRAME_CLIPS`: 44-byte records, the clip after the transform), and
+the add-on gives the window that shape with the window server's shape call — the one the Picture in
+Picture tiles already use for their corners. A window wholly on its display gets its whole bounds, which
+changes nothing; one hanging over the edge is cut at the edge, as a captured proxy was; one wholly off
+its display is drawn as a single point of itself, so it keeps its place, its level and its lease but has
+no pixel on any display. The window's own shape goes back whenever it is put back under the canvas,
+handed off, or its lease ends, so a window used at 1:1 is never clipped to where it was on a canvas, and
+a tile keeps its rounded corners. Single-display setups send no clips: nothing can show past the one
+screen anyway.
+
+### #7 — Center the window in view
+
+A canvas place is a global point, so a window can sit past the screen's edge — over another display's
+screen area — while being perfectly reachable on the canvas. Settings › Keys & Mouse › **Center the
+window in view** (and the window's right-click menu, **Center in View**) now glides the window in focus
+to the middle of the visible area of the display you're looking at: the camera stays where it is, and the
+windows around it stay on screen. The size is kept; a window bigger than the visible area keeps its
+top-left in it, as entering one does. The window in focus is the one under the pointer, else the one
+used last, else the topmost — the same rule ⌃⌥ and Tidy use. From inside a real window the canvas comes
+forward first, as Tidy and Arrange do, then the window it was in is centered.
+
+The movement is a `strength` away from the window's place towards the middle (1 is the middle): the
+action is written so a Settings control for it can land on top without touching the geometry
+(`CanvasController.centeredOrigin`).
+
 ## Build and safety
 
 Run `swift test`, then `make app SIGN="Apple Development: …"` (or use your own signing identity). The application keeps `com.spacefarm.sunlight` to preserve layout/preferences. A different signing team may require granting Accessibility/Screen Recording again and approving the background helper. Do not change SIP or other system protections to install this fork.
@@ -67,9 +103,12 @@ Before replacing `/Applications/Sunlight.app`, quit it normally and back up the 
 
 ## Verification boundaries
 
-The current suite has 588 tests, covering discovery eligibility, malformed metadata, retry timing,
-AX identity matching, persistence/input matching, preservation of full render checkpoints, and
-lift/lower bookkeeping for new windows. The existing suite covers capture limits, camera/display
-coordinate conversion, parking, wire serialization, and fake Dock socket leases. Real-app/private-window
-and multi-monitor visual behavior also needs a live smoke test with the installed build; passing unit
-tests alone is not proof that every app or monitor topology works.
+The current suite has 593 tests, covering discovery eligibility, malformed metadata, retry timing,
+AX identity matching, persistence/input matching, preservation of full render checkpoints,
+lift/lower bookkeeping for new windows, the clip geometry and clipped-frame layout of a
+window on a display, and where Center in View puts a window at each strength. The add-on's own harness (`LiveWindows/test-session.m`, fake window server)
+covers the clip command: set once per change, left alone for a tile, put back at the lease's end
+and on a handoff. The existing suite covers capture limits, camera/display coordinate conversion,
+parking, wire serialization, and fake Dock socket leases. Real-app/private-window and multi-monitor
+visual behavior also needs a live smoke test with the installed build; passing unit tests alone is
+not proof that every app or monitor topology works.

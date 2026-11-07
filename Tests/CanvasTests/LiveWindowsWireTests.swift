@@ -230,4 +230,75 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertFalse(LiveWindowsWire.handoffTakesAnyWindow("sunlight-4"))
         XCTAssertFalse(LiveWindowsWire.handoffTakesAnyWindow(nil))
     }
+
+    // MARK: Clips to the canvas's display (sunlight-58)
+
+    func testClipIsThePartOfTheWindowOnItsDisplay() {
+        let display = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        // Wholly on it: the window's whole bounds, which changes nothing.
+        XCTAssertEqual(LiveWindowsWire.Window.clip(of: CGRect(x: 100, y: 100, width: 400, height: 300),
+                                                   scale: CGSize(width: 1, height: 1), on: display),
+                       CGRect(x: 0, y: 0, width: 400, height: 300))
+        // Hanging over the right edge by half: only the half still on it.
+        XCTAssertEqual(LiveWindowsWire.Window.clip(of: CGRect(x: 800, y: 100, width: 400, height: 300),
+                                                   scale: CGSize(width: 1, height: 1), on: display),
+                       CGRect(x: 0, y: 0, width: 200, height: 300))
+        // Zoomed out: the same, in the window's own points (a screen point is two of them here).
+        XCTAssertEqual(LiveWindowsWire.Window.clip(of: CGRect(x: 950, y: 50, width: 200, height: 150),
+                                                   scale: CGSize(width: 0.5, height: 0.5), on: display),
+                       CGRect(x: 0, y: 0, width: 100, height: 300))
+        // Off it altogether: nothing to draw — the window's place was on another display's screen area.
+        XCTAssertEqual(LiveWindowsWire.Window.clip(of: CGRect(x: 1100, y: 100, width: 400, height: 300),
+                                                   scale: CGSize(width: 1, height: 1), on: display),
+                       .zero)
+        // No display (one canvas, or a tile).: no clip.
+        XCTAssertNil(LiveWindowsWire.Window.clip(of: CGRect(x: 100, y: 100, width: 400, height: 300),
+                                                 scale: CGSize(width: 1, height: 1), on: nil))
+    }
+
+    func testWindowRecordCarriesItsClipWhenGivenItsDisplay() {
+        let display = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        let record = LiveWindowsWire.Window(id: 9, worldRect: CGRect(x: 900, y: 100, width: 400, height: 300),
+                                            inset: 0, camera: Camera(), display: display)
+        XCTAssertEqual(record.drawn, CGRect(x: 900, y: 100, width: 400, height: 300))
+        XCTAssertEqual(record.clip, CGRect(x: 0, y: 0, width: 100, height: 300))
+        // Without one the record says nothing about a shape and the add-on leaves the window's alone.
+        let bare = LiveWindowsWire.Window(id: 9, worldRect: CGRect(x: 900, y: 100, width: 400, height: 300),
+                                          inset: 0, camera: Camera())
+        XCTAssertNil(bare.clip)
+        XCTAssertEqual(record.transform, bare.transform)
+    }
+
+    func testClippedFramesCarryAClipPerRecord() throws {
+        let display = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        let record = LiveWindowsWire.Window(id: 9, worldRect: CGRect(x: 900, y: 100, width: 400, height: 300),
+                                            inset: 0, camera: Camera(), display: display)
+        let bytes = try LiveWindowsWire.snapshot([record], backdrop: 2, overlay: 3, kind: .full, clips: true)
+        XCTAssertEqual(bytes.count, 58)   // 2 for the length, then 11 of header, then a 44-byte record
+        XCTAssertEqual(Array(bytes.prefix(18)), [56, 0, 0x72, 2, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0x03, 9, 0, 0, 0])
+        // The clip last: 0, 0, 100, 300 in the window's own points, as float32s.
+        XCTAssertEqual(Array(bytes.suffix(16)), [0,0,0,0, 0,0,0,0, 0,0,200,66, 0,0,0x96,67])
+        // A window whose shape isn't the canvas's (a tile) is a negative width, "leave it alone".
+        let tile = LiveWindowsWire.Window(id: 8, worldRect: .zero, inset: 0, camera: Camera())
+        let withTile = try LiveWindowsWire.snapshot([tile], backdrop: 2, overlay: 3, kind: .partial, clips: true)
+        XCTAssertEqual(withTile[13], LiveWindowsWire.frameClips)
+        XCTAssertEqual(Array(withTile.suffix(16)), [0,0,0,0, 0,0,0,0, 0,0,0x80,0xbf, 0,0,0,0])
+        // Records are 44 bytes then: the count that still fits the add-on's 4 KB socket buffer is 92.
+        let windows = (10..<10 + LiveWindowsWire.maxClippedWindows).map {
+            LiveWindowsWire.Window(id: UInt32($0), worldRect: .zero, inset: 0, camera: Camera())
+        }
+        let full = try LiveWindowsWire.snapshot(windows, backdrop: 2, overlay: 3, kind: .full, clips: true)
+        XCTAssertLessThan(full.count, 4096)
+        XCTAssertEqual(full.count, 3 + 11 + 44 * LiveWindowsWire.maxClippedWindows)
+        XCTAssertThrowsError(try LiveWindowsWire.snapshot(windows + [tile], backdrop: 2, overlay: 3, kind: .full, clips: true))
+        // A frame without clips still takes 128 of them.
+        let unclipped = (10..<138).map { LiveWindowsWire.Window(id: UInt32($0), worldRect: .zero, inset: 0, camera: Camera()) }
+        XCTAssertNoThrow(try LiveWindowsWire.snapshot(unclipped, backdrop: 2, overlay: 3, kind: .full))
+        // A legacy frame has no flags byte to say it carries them.
+        let legacy = try LiveWindowsWire.snapshot([record], backdrop: 2, overlay: 3, clips: true)
+        XCTAssertEqual(legacy.count, 41)
+        XCTAssertTrue(LiveWindowsWire.clipsInDock(LiveWindowsWire.additionVersion))
+        XCTAssertFalse(LiveWindowsWire.clipsInDock("sunlight-57"))
+        XCTAssertFalse(LiveWindowsWire.clipsInDock(nil))
+    }
 }

@@ -3,13 +3,14 @@ import Carbon.HIToolbox
 
 /// Physical key codes, not typed characters: bindings remain stable when the input source changes.
 enum CanvasBindingAction: String, Codable, CaseIterable, Identifiable {
-    case toggleOverview, showOverview, returnToWindow, zoomIn, zoomOut
+    case toggleOverview, showOverview, returnToWindow, centerInView, zoomIn, zoomOut
     var id: String { rawValue }
     var title: String {
         switch self {
         case .toggleOverview: return "Canvas ↔ last window"
         case .showOverview: return "Show overview"
         case .returnToWindow: return "Return to last window"
+        case .centerInView: return "Center the window in view"
         case .zoomIn: return "Zoom in"
         case .zoomOut: return "Zoom out"
         }

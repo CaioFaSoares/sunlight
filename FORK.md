@@ -110,6 +110,20 @@ view; the seam's in-place growth is what a click gets with the setting off. The 
 entered the window, so the way in lasts the double-click interval and a second click is never the app's.
 The double-click / ⏎ entry is unchanged, and so is a pinch in (in place, the handoff gesture).
 
+### #9 — The other displays are macOS's own
+
+With Settings › Experimental › Multiple displays off, the main display's canvas is the only one, and the
+other screens stay ordinary macOS screens: a window whose own frame is really on one of them — a window
+the app opened there, or one dragged onto it — is left alone (no transform, no clip, no canvas), and the
+canvas only takes windows whose real frame is on its display. It used to take every window on the desk
+and draw it at its canvas place, which put windows on the second screen and kept them there. Which
+display a window is on is decided by its own frame (the display holding its centre, else the one it
+overlaps most, `CanvasController.isOnAnotherDisplay`), not by where a canvas draws it; a frame on no
+display at all — behind the canvas, or out in the canvas's world — is still the canvas's.
+
+The clip works with a single canvas too: a desk can have displays the one canvas doesn't cover, and
+anything drawn past its edge is cut there rather than shown on another screen.
+
 ## Build and safety
 
 Run `swift test`, then `make app SIGN="Apple Development: …"` (or use your own signing identity). The application keeps `com.spacefarm.sunlight` to preserve layout/preferences. A different signing team may require granting Accessibility/Screen Recording again and approving the background helper. Do not change SIP or other system protections to install this fork.
@@ -120,7 +134,7 @@ Before replacing `/Applications/Sunlight.app`, quit it normally and back up the 
 
 ## Verification boundaries
 
-The current suite has 595 tests, covering discovery eligibility, malformed metadata, retry timing,
+The current suite has 596 tests, covering discovery eligibility, malformed metadata, retry timing,
 AX identity matching, persistence/input matching, preservation of full render checkpoints,
 lift/lower bookkeeping for new windows, the clip geometry and clipped-frame layout of a
 window on a display, and where Center in View puts a window at each strength. The add-on's own harness (`LiveWindows/test-session.m`, fake window server)

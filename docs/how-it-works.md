@@ -422,8 +422,11 @@ signing the login item may not auto-launch — sign with a real identity for tha
   resized while the canvas is away (another app in front, or a window in use): only its click and its button work then.
   Tiles don't yet follow you to other Spaces or over full-screen apps.
 - With Settings › Experimental › Multiple displays on (`Settings.multipleDisplays`, off by
-  default; off, the main display's canvas is the only one), every display has its own canvas (`Desk`),
-  and each window is on the canvas of the display it's on. A window moves to another display's canvas
+  default), every display has its own canvas (`Desk`), and each window is on the canvas of the display
+  it's on. Off, the main display's canvas is the only one and **the other screens are macOS's own**: a
+  window really on one of them (or dragged there) is left to it — no transform, no canvas — and the one
+  canvas only takes windows whose own frame is on the main display. Nothing of the canvas is drawn on
+  another screen either: what falls past the main display's edge is clipped there. A window moves to another display's canvas
   when it's moved there for real, from inside it or with ⌃⌥⇧ → ← (Window › Move to Next Display, or its
   right-click menu). Live windows on the other displays
   need add-on sunlight-13, which holds a lease per canvas; with an older one only the main display's

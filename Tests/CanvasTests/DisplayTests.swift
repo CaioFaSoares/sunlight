@@ -22,6 +22,25 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(d.topInset, 25)
     }
 
+    func testAWindowIsOnAnotherDisplayOnlyWhereMacOSHasIt() {
+        let primary = Display(id: 1, uuid: "main", name: "main", frame: CGRect(x: 0, y: 0, width: 2560, height: 1080),
+                              visible: CGRect(x: 0, y: 30, width: 2560, height: 1050), cocoaFrame: CGRect(x: 0, y: 0, width: 2560, height: 1080), scale: 2)
+        let second = Display(id: 2, uuid: "second", name: "second", frame: CGRect(x: -2294, y: 0, width: 2294, height: 1490),
+                             visible: CGRect(x: -2294, y: 30, width: 2294, height: 1460), cocoaFrame: CGRect(x: -2294, y: -410, width: 2294, height: 1490), scale: 2)
+        let displays = [primary, second]
+        // On this display, or on the other.
+        XCTAssertFalse(CanvasController.isOnAnotherDisplay(CGRect(x: 100, y: 100, width: 800, height: 600), than: primary, in: displays))
+        XCTAssertTrue(CanvasController.isOnAnotherDisplay(CGRect(x: 100, y: 100, width: 800, height: 600), than: second, in: displays))
+        XCTAssertTrue(CanvasController.isOnAnotherDisplay(CGRect(x: -1500, y: 200, width: 800, height: 600), than: primary, in: displays))
+        XCTAssertFalse(CanvasController.isOnAnotherDisplay(CGRect(x: -1500, y: 200, width: 800, height: 600), than: second, in: displays))
+        // Straddling the seam: the display holding its centre.
+        XCTAssertFalse(CanvasController.isOnAnotherDisplay(CGRect(x: -100, y: 100, width: 800, height: 600), than: primary, in: displays))
+        XCTAssertTrue(CanvasController.isOnAnotherDisplay(CGRect(x: -100, y: 100, width: 800, height: 600), than: second, in: displays))
+        // On no display at all — behind the canvas, or out in the world — is this canvas's, not another's.
+        XCTAssertFalse(CanvasController.isOnAnotherDisplay(CGRect(x: 5000, y: -3000, width: 400, height: 300), than: primary, in: displays))
+        XCTAssertFalse(CanvasController.isOnAnotherDisplay(CGRect(x: 5000, y: -3000, width: 400, height: 300), than: second, in: displays))
+    }
+
     func testIndexPicksTheCentreThenTheOverlapThenTheNearest() {
         let displays = [display(CGRect(x: 0, y: 0, width: 1000, height: 800)),
                         display(CGRect(x: 1000, y: 0, width: 1000, height: 800))]

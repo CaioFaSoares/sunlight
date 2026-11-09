@@ -27,7 +27,7 @@ enum LiveWindowsWire {
     /// The add-on this build carries (LiveWindows/osax/common.h). An older one in the Dock still works,
     /// with what it has; the app asks to reload it once it answers.
 
-    static let additionVersion = "sunlight-59"
+    static let additionVersion = "sunlight-60"
     /// The first add-on that holds a lease per canvas, so that every display's canvas can show live
     /// windows; with an older one only the main display's does, and the others show pictures.
     static let leasePerCanvas = 13
@@ -79,6 +79,12 @@ enum LiveWindowsWire {
     /// on another display's screen area, where the real window is then drawn over that display's canvas.
     static let clipsFrom = 58
     static func clipsInDock(_ version: String?) -> Bool { additionNumber(version) >= clipsFrom }
+
+    /// Whether an add-on of this version keeps a window it releases at 1:1 on the canvas's display
+    /// (`LiveWindowsWire.snapshot`'s `confine`, the frame flag `confineFlag`): a desk with displays no
+    /// canvas covers would otherwise show it, whole, on another screen while the canvas is away.
+    static let confinesFrom = 60
+    static func confinesInDock(_ version: String?) -> Bool { additionNumber(version) >= confinesFrom }
 
     /// Whether an add-on of this version takes each kept window's clip in a handoff (28-byte kept
     /// entries, sunlight-59): the windows kept on show around the entered one are real, at 1:1, and no
@@ -166,6 +172,9 @@ enum LiveWindowsWire {
     static let frameFull: UInt8 = 0x01
     /// Every record carries its clip too (sunlight-58): 44 bytes instead of 28.
     static let frameClips: UInt8 = 0x02
+    /// A window released from this canvas at 1:1 is kept on the canvas's display, never another one
+    /// (sunlight-60): set when the desk has displays no canvas covers.
+    static let frameConfine: UInt8 = 0x04
 
     static func pack<T>(_ value: T, into data: inout Data) {
         var value = value
@@ -356,7 +365,8 @@ enum LiveWindowsWire {
     /// (`Window.clip`); a record without one carries a negative width, which the add-on takes as "leave
     /// the shape alone". Records are 44 bytes then instead of 28, so fewer windows fit in a frame.
     static func snapshot(_ windows: [Window], backdrop: CGWindowID, overlay: CGWindowID,
-                         kind: FrameKind = .legacy, above pid: pid_t = 0, clips: Bool = false) throws -> Data {
+                         kind: FrameKind = .legacy, above pid: pid_t = 0, clips: Bool = false,
+                         confine: Bool = false) throws -> Data {
         let clipped = clips && kind != .legacy
         guard windows.count <= windowLimit(clips: clipped), Set(windows.map(\.id)).count == windows.count else {
             throw LiveWindowsError.protocolError("Too many or duplicate live windows")
@@ -364,8 +374,8 @@ enum LiveWindowsWire {
         var data = Data()
         pack(backdrop, into: &data); pack(overlay, into: &data); pack(UInt16(windows.count), into: &data)
         switch kind {
-        case .full: data.append(frameFull | (clipped ? frameClips : 0))
-        case .partial: data.append(clipped ? frameClips : 0)
+        case .full: data.append(frameFull | (clipped ? frameClips : 0) | (confine ? frameConfine : 0))
+        case .partial: data.append((clipped ? frameClips : 0) | (confine ? frameConfine : 0))
         case .legacy: break
         }
         if windows.isEmpty, kind != .legacy, pid != 0 { pack(Int32(pid), into: &data) }

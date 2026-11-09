@@ -6,6 +6,10 @@ This is a patch set on top of upstream `main`, not a release frozen on one upstr
 `Info.plist` stays exactly as upstream ships it; the built app is stamped
 `<upstream>-caio.<FORK_REVISION>` with a build number derived from upstream's plus the revision.
 
+Last synced: upstream 0.2.4 (`cf7aa16`), revision 13. The rebase conflicted in `CanvasController`,
+`WindowCapture`, `Hotkey` and `RealWindowDriver`; every conflict was the fork's own change against
+upstream's `Log.note` rewrite or its closed-by-app fix, and both sides were kept.
+
 ## Tracking upstream
 
 `scripts/sync-upstream.sh` fetches `spacefarm-digital/sunlight`, rebases this patch set onto its `main`,
@@ -125,6 +129,26 @@ The setup window no longer opens at launch on a Mac already set up just because 
 for the moment: a Dock restart at launch (takeover) unloads it and the canvas loads it back by itself.
 Before, it opened on its last page at every such launch, with the canvas held back while it did.
 
+### #10 — A released window stays on its canvas's display
+
+With one canvas and a desk of more displays than it covers, a window's place on the canvas is a global
+point, so a window can sit past the screen's edge — over another display's screen area. While the canvas
+is up, sunlight-58's clip keeps it from drawing there. The canvas is not always up: when another app is
+in front, Sunlight releases its live windows so they can be used, and a window the canvas had drawn at
+1:1 is put back natively where the canvas drew it (sunlight-25/28, `sunbeam_settle`) — which on that desk
+is the *other* display's screen. There the real window showed, whole, over that display, and the window
+that was on the canvas here had vanished from it; navigating back to it and bring the canvas forward
+made it jump between the two, and the WindowServer work that came with it stalled the Dock (the add-on
+runs there) for seconds.
+
+A canvas that doesn't cover the desk now says so in every live frame (`SUNBEAM_FRAME_CONFINE`,
+add-on sunlight-60, set from `Display.all.count > canvases.count`). A window released at 1:1 from such a
+canvas is moved natively onto the canvas's own display instead (`sunbeam_confined`), wholly on it, beside
+the edge it went off, its title bar under the menu bar — so it is the window the canvas has, on the
+screen it belongs to, and never a window on another screen. On a desk the canvas covers (one display, or
+a canvas per display) nothing changes: the flag is not sent, and a window put back out of view stays
+where the canvas had it.
+
 ## Build and safety
 
 Run `swift test`, then `make app SIGN="Apple Development: …"` (or use your own signing identity). The application keeps `com.spacefarm.sunlight` to preserve layout/preferences. A different signing team may require granting Accessibility/Screen Recording again and approving the background helper. Do not change SIP or other system protections to install this fork.
@@ -135,12 +159,13 @@ Before replacing `/Applications/Sunlight.app`, quit it normally and back up the 
 
 ## Verification boundaries
 
-The current suite has 595 tests, covering discovery eligibility, malformed metadata, retry timing,
+The current suite has 631 tests, covering discovery eligibility, malformed metadata, retry timing,
 AX identity matching, persistence/input matching, preservation of full render checkpoints,
 lift/lower bookkeeping for new windows, the clip geometry and clipped-frame layout of a
-window on a display, and where Center in View puts a window at each strength. The add-on's own harness (`LiveWindows/test-session.m`, fake window server)
+window on a display, the confine flag a canvas that doesn't cover the desk sends, and where Center in
+View puts a window at each strength. The add-on's own harness (`LiveWindows/test-session.m`, fake window server)
 covers the clip command: set once per change, left alone for a tile, put back at the lease's end
-and on a handoff. The existing suite covers capture limits, camera/display coordinate conversion,
+and on a handoff — and the confine geometry that keeps a released window on its canvas's display. The existing suite covers capture limits, camera/display coordinate conversion,
 parking, wire serialization, and fake Dock socket leases. Real-app/private-window and multi-monitor
 visual behavior also needs a live smoke test with the installed build; passing unit tests alone is
 not proof that every app or monitor topology works.

@@ -423,10 +423,11 @@ signing the login item may not auto-launch — sign with a real identity for tha
   Tiles don't yet follow you to other Spaces or over full-screen apps.
 - With Settings › Experimental › Multiple displays on (`Settings.multipleDisplays`, off by
   default), every display has its own canvas (`Desk`), and each window is on the canvas of the display
-  it's on. Off, the main display's canvas is the only one and **the other screens are macOS's own**: a
-  window really on one of them (or dragged there) is left to it — no transform, no canvas — and the one
-  canvas only takes windows whose own frame is on the main display. Nothing of the canvas is drawn on
-  another screen either: what falls past the main display's edge is clipped there. A window moves to another display's canvas
+  it's on. Off, the main display's canvas is the only one and **the other screens are macOS's own**: no
+  canvas covers them, and nothing of the canvas is drawn on them. Every window is on that one canvas —
+  a window macOS really has on another screen is not handed back to it — and a window an app opens
+  there is taken in by the new-window path, which places it in view on the canvas.
+  A window moves to another display's canvas
   when it's moved there for real, from inside it or with ⌃⌥⇧ → ← (Window › Move to Next Display, or its
   right-click menu). Live windows on the other displays
   need add-on sunlight-13, which holds a lease per canvas; with an older one only the main display's
@@ -437,7 +438,10 @@ signing the login item may not auto-launch — sign with a real identity for tha
   area; from sunlight-58 each canvas clips its live windows to its own display (a window hanging over the
   edge is cut there, and one entirely off it draws nowhere), so nothing of one canvas shows on another.
   A window off its display's edge is not drawn on another one, but it keeps its place on the canvas and
-  comes back with it.
+  comes back with it. While the canvas is away, a window it releases at 1:1 is put back on the canvas's
+  own display rather than at the place the canvas drew it (sunlight-60): a canvas that doesn't cover the
+  desk says so in its frames, and the add-on keeps those windows on its display, never on another
+  screen.
 - Activating an app raises *all* its windows, not just the one you entered.
 - Resizing a window while it's real: the proxy re-anchors on return, but the texture stretches for a beat
   until the stream reconfigures.

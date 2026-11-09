@@ -326,4 +326,22 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertFalse(LiveWindowsWire.handoffClipsInDock("sunlight-58"))
         XCTAssertFalse(LiveWindowsWire.handoffClipsInDock(nil))
     }
+
+    /// A canvas whose desk has displays it doesn't cover says so in its frames (sunlight-60): a window
+    /// it releases at 1:1 is kept on its display, never on another screen.
+    func testConfinedFramesSaySo() throws {
+        let record = LiveWindowsWire.Window(id: 9, worldRect: CGRect(x: 100, y: 100, width: 400, height: 300),
+                                            inset: 0, camera: Camera())
+        let plain = try LiveWindowsWire.snapshot([record], backdrop: 2, overlay: 3, kind: .full, clips: true)
+        XCTAssertEqual(plain[13], LiveWindowsWire.frameFull | LiveWindowsWire.frameClips)
+        let confined = try LiveWindowsWire.snapshot([record], backdrop: 2, overlay: 3, kind: .full,
+                                                   clips: true, confine: true)
+        XCTAssertEqual(confined[13], LiveWindowsWire.frameFull | LiveWindowsWire.frameClips | LiveWindowsWire.frameConfine)
+        let partial = try LiveWindowsWire.snapshot([record], backdrop: 2, overlay: 3, kind: .partial,
+                                                  clips: true, confine: true)
+        XCTAssertEqual(partial[13], LiveWindowsWire.frameClips | LiveWindowsWire.frameConfine)
+        XCTAssertTrue(LiveWindowsWire.confinesInDock(LiveWindowsWire.additionVersion))
+        XCTAssertFalse(LiveWindowsWire.confinesInDock("sunlight-59"))
+        XCTAssertFalse(LiveWindowsWire.confinesInDock(nil))
+    }
 }

@@ -1092,6 +1092,10 @@ final class CanvasController {
         // add-on clips the drawing to it — with one canvas too, since a desk can have displays the one
         // canvas doesn't cover. A tile keeps its corners: no clip.
         let clips = flagged && additionNumber >= LiveWindowsWire.clipsFrom
+        // A desk with displays this canvas doesn't cover (one canvas, the others macOS's own): a window
+        // it releases at 1:1 is kept on this display, never on another screen (fork `#10`, sunlight-60).
+        let confine = flagged && additionNumber >= LiveWindowsWire.confinesFrom
+            && (desk?.canvases.count ?? 1) < Display.all.count
         let limit = LiveWindowsWire.windowLimit(clips: clips)
         let camera = view.camera
         let wire = global(camera)   // the add-on places windows in global points
@@ -1183,7 +1187,7 @@ final class CanvasController {
             realWindows.submit(try LiveWindowsWire.snapshot(windows, backdrop: CGWindowID(backdrop.windowNumber),
                                                      overlay: CGWindowID(window.windowNumber),
                                                      kind: flagged ? (full ? .full : .partial) : .legacy,
-                                                     clips: clips),
+                                                     clips: clips, confine: confine),
                                shadow: shadow, full: full, alphas: alphas)
         } catch { fallBackFromRealWindows(error.localizedDescription) }
     }

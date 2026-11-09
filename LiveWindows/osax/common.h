@@ -14,7 +14,7 @@
 // Bump whenever the add-on changes: the helper reinstalls it (restarting the Dock) only when the
 // installed version differs, and reports a Dock still running an older one.
 
-#define OSAX_VERSION "sunlight-59"
+#define OSAX_VERSION "sunlight-60"
 
 // The stock opcodes kept from yabai, with yabai's encoding. Every other stock opcode is ignored.
 enum sa_opcode

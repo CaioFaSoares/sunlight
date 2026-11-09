@@ -23,8 +23,12 @@
 // it the frame is partial: only transforms, only for the windows in it, and the rest stay as they are.
 // Clips (since sunlight-58): every record carries, after its transform, the part of the window's own
 // points still on its canvas's display (four floats); records are 44 bytes then, not 28.
+// Confine (since sunlight-60): a window released at 1:1 goes to its canvas's display, never to another
+// one — a desk with displays no canvas covers (the fork's one-canvas mode) would otherwise show it,
+// whole, on the other screen while the canvas is away. See `sunbeam_confined`.
 #define SUNBEAM_FRAME_FULL 0x01
 #define SUNBEAM_FRAME_CLIPS 0x02
+#define SUNBEAM_FRAME_CONFINE 0x04
 
 extern CGError SLSGetWindowLevel(int cid, uint32_t wid, int *level);
 extern CGError SLSSetWindowLevel(int cid, uint32_t wid, int level);
@@ -171,6 +175,33 @@ static CGPoint sunbeam_native_at(CGPoint drawn, double top)
 {
     if (isfinite(top) && drawn.y < top) drawn.y = top;
     return drawn;
+}
+
+/// The canvas's client says the desk has displays its canvas doesn't cover (`SUNBEAM_FRAME_CONFINE`):
+/// a window it releases at 1:1 is kept on the canvas's display instead of the place the canvas drew it,
+/// which can be over another display's screen.
+static bool sunbeam_confine;
+
+/// Where a window the canvas released at 1:1 sits natively, kept on the canvas's display when the canvas
+/// doesn't cover the desk: `drawn` when it is wholly on that display already, else wholly on it, beside
+/// the edge it went off, its title bar under the menu bar. `backdrop` is the canvas window, which covers
+/// exactly that display. A window bigger than the display keeps its top-left there.
+static CGPoint sunbeam_confined(CGPoint drawn, CGSize size, uint32_t backdrop, double top)
+{
+    if (!sunbeam_confine || !backdrop) return drawn;
+    int cid = SLSMainConnectionID();
+    CGRect canvas;
+    if (SLSGetWindowBounds(cid, backdrop, &canvas) != kCGErrorSuccess) return drawn;
+    if (canvas.size.width < 1 || canvas.size.height < 1) return drawn;
+    CGRect rect = CGRectMake(drawn.x, drawn.y, size.width, size.height);
+    if (CGRectContainsRect(canvas, rect)) return drawn;
+    double minY = isfinite(top) && top > canvas.origin.y ? top : canvas.origin.y;
+    double x = size.width >= canvas.size.width ? canvas.origin.x
+        : fmin(fmax(drawn.x, canvas.origin.x), CGRectGetMaxX(canvas) - size.width);
+    double y = size.height >= CGRectGetMaxY(canvas) - minY ? minY
+        : fmin(fmax(drawn.y, minY), CGRectGetMaxY(canvas) - size.height);
+    if (!isfinite(x) || !isfinite(y)) return drawn;
+    return CGPointMake(x, y);
 }
 
 static double sunbeam_now(void)
@@ -805,10 +836,17 @@ static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, doubl
     if (sunbeam_moves_in_transaction() && SLSGetWindowTransform(cid, saved->wid, &t) == kCGErrorSuccess
         && fabs(t.a - 1) < 1e-3 && fabs(t.d - 1) < 1e-3) {
         CGPoint drawn = CGPointMake(-t.tx / t.a, -t.ty / t.a);
+        // On a desk with displays this canvas doesn't cover, the place the canvas drew it is over
+        // another display's screen: there it would show, whole, while the canvas is away (fork #9).
+        // Kept on this canvas's display instead (`sunbeam_confined`), at the edge it went off.
+        CGSize size = CGSizeZero;
+        CGRect window;
+        if (sunbeam_confine && SLSGetWindowBounds(cid, saved->wid, &window) == kCGErrorSuccess) size = window.size;
+        CGPoint native = sunbeam_confined(sunbeam_native_at(drawn, top), size, backdrop, top);
         CFTypeRef transaction = sunbeam_transaction_begin(cid);
         if (transaction) {
-            SLSTransactionMoveWindowWithGroup(transaction, saved->wid, sunbeam_native_at(drawn, top));
-            sunbeam_transform(transaction, cid, saved->wid, CGAffineTransformMakeTranslation(-drawn.x, -drawn.y));
+            SLSTransactionMoveWindowWithGroup(transaction, saved->wid, native);
+            sunbeam_transform(transaction, cid, saved->wid, CGAffineTransformMakeTranslation(-native.x, -native.y));
             if (sunbeam_transaction_end(transaction)) {
                 sunbeam_shadow_reset(saved->wid, saved->owner);
                 sunbeam_alpha_reset(saved);
@@ -1248,6 +1286,7 @@ static bool sunbeam_frame(char *bytes, int length, struct sunbeam_saved *saved, 
     bool has_flags = has_above || length == 11 + count * 28 || length == 11 + count * 44;
     if (!has_flags && length != 10 + count * 28) return false;
     uint8_t flags = has_flags ? (uint8_t)bytes[10] : 0;
+    if (has_flags) sunbeam_confine = (flags & SUNBEAM_FRAME_CONFINE) != 0;
     bool clipped = has_flags && count > 0 && (flags & SUNBEAM_FRAME_CLIPS) && length == 11 + count * 44;
     int stride = clipped ? 44 : 28;
     int above_pid = 0;

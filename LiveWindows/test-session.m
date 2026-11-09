@@ -148,6 +148,17 @@ static void send_clipped(int fd, const uint32_t *wids, const float (*clips)[4], 
     assert(send(fd, bytes, 2 + length, 0) == 2 + length);
     uint8_t status; assert(sunbeam_read(fd, &status, 1)); assert(status == 0);
 }
+// A flagged frame with one window at 1:1 drawn at (x, y): where the canvas has it on screen.
+static void send_drawn(int fd, uint32_t wid, float x, float y, uint8_t flags) {
+    char bytes[3 + 11 + 28]; int16_t length = 1 + 11 + 28; uint32_t backdrop = 1, overlay = 2; uint16_t n = 1;
+    memcpy(bytes, &length, 2); bytes[2] = SUNBEAM_FRAME;
+    memcpy(bytes + 3, &backdrop, 4); memcpy(bytes + 7, &overlay, 4); memcpy(bytes + 11, &n, 2); bytes[13] = flags;
+    float transform[6] = {1, 0, 0, 1, -x, -y};
+    memcpy(bytes + 14, &wid, 4); memcpy(bytes + 18, transform, 24);
+    assert(send(fd, bytes, 2 + length, 0) == 2 + length);
+    uint8_t status; assert(sunbeam_read(fd, &status, 1)); assert(status == 0);
+}
+
 // A shadow request: the inactive look set `inactive` of the way, and the active look `active` of the
 // way, from the standard inactive look (8, 0.22, 0.55, 7) to the standard active one (20, 0.4, 0.6, 18).
 static uint8_t send_shadow(int fd, uint32_t wid, float inactive, float active) {
@@ -449,6 +460,32 @@ int main(void) {
     }
     close(fd); pthread_join(thread, NULL);
 
+    // A confined release (sunlight-60): a canvas whose desk has displays it doesn't cover says so in
+    // its frames, and a window it releases at 1:1 is kept on the canvas's display by `sunbeam_confined`
+    // — never at the place the canvas drew it, over another display's screen, where it would show whole
+    // while the canvas is away. The canvas window (backdrop) is 400 by 300 at the origin here.
+    CGAffineTransform canvas_before = transforms[1];
+    transforms[1] = CGAffineTransformIdentity;
+    fd = start(&thread);
+    send_drawn(fd, 7, 600, 120, SUNBEAM_FRAME_FULL | SUNBEAM_FRAME_CONFINE);
+    assert(sunbeam_confine);
+    assert(CGPointEqualToPoint(sunbeam_confined(CGPointMake(600, 120), CGSizeMake(400, 300), 1, NAN), CGPointZero));
+    CGPoint inset = sunbeam_confined(CGPointMake(600, 120), CGSizeMake(200, 150), 1, NAN);
+    assert(inset.x == 200 && inset.y == 120);
+    CGPoint inside = CGPointMake(50, 40);
+    assert(CGPointEqualToPoint(sunbeam_confined(inside, CGSizeMake(200, 150), 1, NAN), inside));
+    CGPoint under_bar = sunbeam_confined(CGPointMake(-30, -50), CGSizeMake(200, 150), 1, 25);
+    assert(under_bar.x == 0 && under_bar.y == 25);
+    close(fd); pthread_join(thread, NULL);
+    // Without the flag (a canvas that covers the desk), a release leaves the window where the canvas
+    // drew it, as before.
+    fd = start(&thread);
+    send_drawn(fd, 7, 600, 120, SUNBEAM_FRAME_FULL);
+    assert(!sunbeam_confine);
+    assert(CGPointEqualToPoint(sunbeam_confined(CGPointMake(600, 120), CGSizeMake(200, 150), 1, NAN), CGPointMake(600, 120)));
+    close(fd); pthread_join(thread, NULL);
+    transforms[1] = canvas_before;
+
     // A window minimized while leased (sunlight-12): off screen, it is scaled and lifted with the
     // rest but never given a place in the order, which from the Dock's connection would bring it back
     // on screen; released, it gets its level and transform back, again without an order.
@@ -662,5 +699,5 @@ int main(void) {
     // No heartbeat: Dock restores on the three-second lease timeout even if the client hangs.
     pthread_join(thread, NULL); close(fd);
     assert(CGAffineTransformEqualToTransform(transforms[4], original) && levels[4] == -10);
-    puts("PASS: fragmented frames, windows put back at native size only after the commit, disconnect, invalid transform, two leases at once, window alpha (leased only, relative, back on release, handoff and a full frame leaving it out), handoff (leased, unleased, missing, keeping windows on show, native places stopped at the menu bar), shadows (eased both ways, refused, cut short), flagged frames (partial, keepalive, full, app in front), the canvas lifted and lowered, a window minimized while leased never ordered, lease expiry, pinned windows (on show through a handoff and a release for an app in front, raised before the windows that come up under them, taken back by a frame, put back at the lease's end), shapes (rounded corners as rows at the native place, refused, put back on request and at the lease's end), clips to its canvas's display (set once per change, left alone for a tile, back at the lease's end), unmanaged isolation");
+    puts("PASS: fragmented frames, windows put back at native size only after the commit, disconnect, invalid transform, two leases at once, window alpha (leased only, relative, back on release, handoff and a full frame leaving it out), handoff (leased, unleased, missing, keeping windows on show, native places stopped at the menu bar), shadows (eased both ways, refused, cut short), flagged frames (partial, keepalive, full, app in front), the canvas lifted and lowered, a window minimized while leased never ordered, lease expiry, pinned windows (on show through a handoff and a release for an app in front, raised before the windows that come up under them, taken back by a frame, put back at the lease's end), shapes (rounded corners as rows at the native place, refused, put back on request and at the lease's end), clips to its canvas's display (set once per change, left alone for a tile, back at the lease's end), confined releases (a window kept on its canvas's display, not on another screen), unmanaged isolation");
 }

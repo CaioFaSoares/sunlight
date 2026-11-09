@@ -183,9 +183,10 @@ static CGPoint sunbeam_native_at(CGPoint drawn, double top)
 static bool sunbeam_confine;
 
 /// Where a window the canvas released at 1:1 sits natively, kept on the canvas's display when the canvas
-/// doesn't cover the desk: `drawn` when it is wholly on that display already, else wholly on it, beside
-/// the edge it went off, its title bar under the menu bar. `backdrop` is the canvas window, which covers
-/// exactly that display. A window bigger than the display keeps its top-left there.
+/// doesn't cover the desk: `drawn` while any of it is on that display — one hanging over an edge is a
+/// window on its screen, as it is without a canvas — else wholly on it, beside the edge it went off, its
+/// title bar under the menu bar. `backdrop` is the canvas window, which covers exactly that display. A
+/// window bigger than the display keeps its top-left there.
 static CGPoint sunbeam_confined(CGPoint drawn, CGSize size, uint32_t backdrop, double top)
 {
     if (!sunbeam_confine || !backdrop) return drawn;
@@ -194,7 +195,7 @@ static CGPoint sunbeam_confined(CGPoint drawn, CGSize size, uint32_t backdrop, d
     if (SLSGetWindowBounds(cid, backdrop, &canvas) != kCGErrorSuccess) return drawn;
     if (canvas.size.width < 1 || canvas.size.height < 1) return drawn;
     CGRect rect = CGRectMake(drawn.x, drawn.y, size.width, size.height);
-    if (CGRectContainsRect(canvas, rect)) return drawn;
+    if (CGRectIntersectsRect(canvas, rect)) return drawn;
     double minY = isfinite(top) && top > canvas.origin.y ? top : canvas.origin.y;
     double x = size.width >= canvas.size.width ? canvas.origin.x
         : fmin(fmax(drawn.x, canvas.origin.x), CGRectGetMaxX(canvas) - size.width);
@@ -817,7 +818,7 @@ static bool sunbeam_is_above(uint32_t wid, uint32_t backdrop)
 /// is ordered under it once more, and read back; one that stays above is left at the canvas's transform
 /// (a small picture of itself, as it was) rather than shown full-size over the entered window.
 static bool sunbeam_moves_in_transaction(void);
-static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, double top)
+static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, double top, uint32_t confineTo)
 {
     if (!sunbeam_owner_matches(saved)) return;
     int cid = SLSMainConnectionID();
@@ -841,8 +842,8 @@ static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, doubl
         // Kept on this canvas's display instead (`sunbeam_confined`), at the edge it went off.
         CGSize size = CGSizeZero;
         CGRect window;
-        if (sunbeam_confine && SLSGetWindowBounds(cid, saved->wid, &window) == kCGErrorSuccess) size = window.size;
-        CGPoint native = sunbeam_confined(sunbeam_native_at(drawn, top), size, backdrop, top);
+        if (sunbeam_confine && confineTo && SLSGetWindowBounds(cid, saved->wid, &window) == kCGErrorSuccess) size = window.size;
+        CGPoint native = sunbeam_confined(sunbeam_native_at(drawn, top), size, confineTo, top);
         CFTypeRef transaction = sunbeam_transaction_begin(cid);
         if (transaction) {
             SLSTransactionMoveWindowWithGroup(transaction, saved->wid, native);
@@ -876,6 +877,7 @@ struct sunbeam_pending {
     CGAffineTransform transform;
     uint32_t backdrop;
     double due, top;
+    uint32_t confine;   // the canvas's display, for `sunbeam_confined` (0: leave the place alone)
 };
 #define SUNBEAM_SETTLE_DELAY 0.03
 static struct sunbeam_pending sunbeam_pending_list[SUNBEAM_LIMIT * SUNBEAM_SESSIONS];
@@ -893,7 +895,7 @@ static void sunbeam_settle_due(void)
         struct sunbeam_pending *p = &sunbeam_pending_list[i];
         if (p->due > now + 0.001) { ++i; continue; }
         struct sunbeam_saved saved = { .wid = p->wid, .owner = p->owner, .transform = p->transform };
-        sunbeam_settle(&saved, p->backdrop, p->top);
+        sunbeam_settle(&saved, p->backdrop, p->top, p->confine);
         memmove(p, p + 1, (sunbeam_pending_count - i - 1) * sizeof(*p));
         --sunbeam_pending_count;
     }
@@ -901,19 +903,19 @@ static void sunbeam_settle_due(void)
 }
 
 /// Queues the window's native size for `SUNBEAM_SETTLE_DELAY` from now. Under the lock.
-static void sunbeam_settle_later(struct sunbeam_saved *saved, uint32_t backdrop, double top)
+static void sunbeam_settle_later(struct sunbeam_saved *saved, uint32_t backdrop, double top, uint32_t confineTo)
 {
 #ifdef SUNBEAM_SETTLE_NOW
-    sunbeam_settle(saved, backdrop, top);
+    sunbeam_settle(saved, backdrop, top, confineTo);
 #else
     if (!sunbeam_owner_matches(saved)) return;
     int index = -1;
     for (int i = 0; i < sunbeam_pending_count; ++i) if (sunbeam_pending_list[i].wid == saved->wid) index = i;
     if (index < 0) {
-        if (sunbeam_pending_count >= (int)(sizeof(sunbeam_pending_list) / sizeof(*sunbeam_pending_list))) { sunbeam_settle(saved, backdrop, top); return; }
+        if (sunbeam_pending_count >= (int)(sizeof(sunbeam_pending_list) / sizeof(*sunbeam_pending_list))) { sunbeam_settle(saved, backdrop, top, confineTo); return; }
         index = sunbeam_pending_count++;
     }
-    sunbeam_pending_list[index] = (struct sunbeam_pending){ saved->wid, saved->owner, saved->transform, backdrop, sunbeam_now() + SUNBEAM_SETTLE_DELAY, top };
+    sunbeam_pending_list[index] = (struct sunbeam_pending){ saved->wid, saved->owner, saved->transform, backdrop, sunbeam_now() + SUNBEAM_SETTLE_DELAY, top, confineTo };
     if (!sunbeam_settle_queue) sunbeam_settle_queue = dispatch_queue_create("com.spacefarm.sunlight.settle", NULL);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(SUNBEAM_SETTLE_DELAY * NSEC_PER_SEC) + 2 * NSEC_PER_MSEC),
                    sunbeam_settle_queue, ^{ sunbeam_settle_due(); });
@@ -1250,7 +1252,7 @@ static void sunbeam_release_all(struct sunbeam_saved *saved, int count, uint32_t
     // Back at native size only now, where they are out of sight (see `sunbeam_restore`); the front app's
     // are on show at the canvas's 1:1 transform, which drew them where they are natively. A pinned
     // window stays a picture of itself, at the transform the canvas drew it at.
-    if (transacted) for (int i = count - 1; i >= 0; --i) if (!pinned[i]) sunbeam_settle_later(&saved[i], front[i] ? 0 : (canvas ? backdrop : 0), top);
+    if (transacted) for (int i = count - 1; i >= 0; --i) if (!pinned[i]) sunbeam_settle_later(&saved[i], front[i] ? 0 : (canvas ? backdrop : 0), top, canvas ? backdrop : 0);
     // Every window's own alpha back (sunlight-40), now that each is under the backdrop or the front app's
     // and on show as itself: the settle queue's copies don't carry what the canvas changed. Its full
     // shape too (sunlight-52) unless it stays on show as a tile.
@@ -1835,7 +1837,7 @@ static bool sunbeam_handoff(uint32_t wid, CGPoint point, uint32_t overlay, uint3
         for (int i = count - 1; i >= 0; --i) {
             bool on_show = i == entered || pinned[i];
             for (int k = 0; k < kept_count; ++k) if (kept[k].index == i) on_show = true;
-            if (!on_show) sunbeam_settle_later(&saved[i], bd, top);
+            if (!on_show) sunbeam_settle_later(&saved[i], bd, top, bd);
         }
     }
     return true;

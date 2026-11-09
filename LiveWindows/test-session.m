@@ -474,7 +474,11 @@ int main(void) {
     assert(inset.x == 200 && inset.y == 120);
     CGPoint inside = CGPointMake(50, 40);
     assert(CGPointEqualToPoint(sunbeam_confined(inside, CGSizeMake(200, 150), 1, NAN), inside));
-    CGPoint under_bar = sunbeam_confined(CGPointMake(-30, -50), CGSizeMake(200, 150), 1, 25);
+    // Hanging over an edge is a window on its screen: only one that is nowhere on it moves.
+    CGPoint overhang = CGPointMake(300, 100);
+    assert(CGPointEqualToPoint(sunbeam_confined(overhang, CGSizeMake(200, 150), 1, NAN), overhang));
+    // Off past a corner, the title bar goes under the menu bar rather than above it.
+    CGPoint under_bar = sunbeam_confined(CGPointMake(-300, -400), CGSizeMake(200, 150), 1, 25);
     assert(under_bar.x == 0 && under_bar.y == 25);
     close(fd); pthread_join(thread, NULL);
     // Without the flag (a canvas that covers the desk), a release leaves the window where the canvas

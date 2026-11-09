@@ -145,7 +145,10 @@ A canvas that doesn't cover the desk now says so in every live frame (`SUNBEAM_F
 add-on sunlight-60, set from `Display.all.count > canvases.count`). A window released at 1:1 from such a
 canvas is moved natively onto the canvas's own display instead (`sunbeam_confined`), wholly on it, beside
 the edge it went off, its title bar under the menu bar — so it is the window the canvas has, on the
-screen it belongs to, and never a window on another screen. On a desk the canvas covers (one display, or
+screen it belongs to, and never a window on another screen. A window still on the canvas — even one
+hanging over an edge — is left where it is: that is a window on its screen, as it is without a canvas.
+The windows of an app that takes the front and stays above the canvas while the canvas goes behind it are
+confined too (they are not ordered under the canvas, only placed on its display). On a desk the canvas covers (one display, or
 a canvas per display) nothing changes: the flag is not sent, and a window put back out of view stays
 where the canvas had it.
 

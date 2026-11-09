@@ -578,6 +578,9 @@ static int sunbeam_rounded_rects(double width, double height, int radius, CGRect
     return n;
 }
 
+static CGSize sunbeam_clip_size(uint32_t wid, CGSize read);
+static CGPoint sunbeam_clip_origin(uint32_t wid, CGPoint read);
+
 /// Sets `wid`'s shape to its bounds with corners of `radius` points (0: its full bounds again), at the
 /// native place it has. False when the window server refused or won't describe the window.
 static bool sunbeam_shape_apply(uint32_t wid, int radius)
@@ -585,14 +588,17 @@ static bool sunbeam_shape_apply(uint32_t wid, int radius)
     int cid = SLSMainConnectionID();
     CGRect bounds;
     if (SLSGetWindowBounds(cid, wid, &bounds) != kCGErrorSuccess) return false;
-    double width = floor(bounds.size.width), height = floor(bounds.size.height);
+    // Its own size and origin, not the shape's: a clipped window reads its clip (sunlight-62).
+    CGSize size = sunbeam_clip_size(wid, bounds.size);
+    CGPoint origin = sunbeam_clip_origin(wid, bounds.origin);
+    double width = floor(size.width), height = floor(size.height);
     if (width < 1 || height < 1) return false;
     CGRect rects[2 * SUNBEAM_SHAPE_RADIUS + 1];
     int n = sunbeam_rounded_rects(width, height, radius, rects);
     CFTypeRef region = NULL;
     CGError made = n == 1 ? CGSNewRegionWithRect(&rects[0], &region) : CGSNewRegionWithRectList(rects, n, &region);
     if (made != kCGErrorSuccess || !region) return false;
-    CGError set = SLSSetWindowShape(cid, wid, (float)bounds.origin.x, (float)bounds.origin.y, region);
+    CGError set = SLSSetWindowShape(cid, wid, (float)origin.x, (float)origin.y, region);
     CFRelease(region);
     return set == kCGErrorSuccess;
 }
@@ -655,9 +661,41 @@ static uint8_t sunbeam_shape_set(const char *bytes, int length)
 // The shape is the window server's, in the window's own points, with the bounds' origin as the
 // offsets (`sunbeam_shape_apply`). It is a property of the window that stays until something changes
 // it, so these entries remember what was set: a frame repeating it costs nothing.
-struct sunbeam_clipped { uint32_t wid; int owner; float clip[4]; bool set; };
+struct sunbeam_clipped {
+    uint32_t wid;
+    int owner;
+    float clip[4];
+    bool set;
+    // The window's own size, read before its first clip: `SLSGetWindowBounds` reports the *shape* once
+    // one is set — a window clipped to a point reads 1 by 1 — so the size it is put back to has to be
+    // remembered here (sunlight-62). The origin is worked out from that and the clip's own offset.
+    CGSize size;
+};
 static struct sunbeam_clipped sunbeam_clipped_list[SUNBEAM_LIMIT];
 static int sunbeam_clipped_next;
+
+/// The record for `wid`, whichever lease set it.
+static struct sunbeam_clipped *sunbeam_clip_find_any(uint32_t wid)
+{
+    for (int i = 0; i < SUNBEAM_LIMIT; ++i) if (sunbeam_clipped_list[i].wid == wid && sunbeam_clipped_list[i].set) return &sunbeam_clipped_list[i];
+    return NULL;
+}
+
+/// The window's own size, from its clip record when it has one (see `struct sunbeam_clipped`).
+static CGSize sunbeam_clip_size(uint32_t wid, CGSize read)
+{
+    struct sunbeam_clipped *known = sunbeam_clip_find_any(wid);
+    return known && known->size.width > 0.5 && known->size.height > 0.5 ? known->size : read;
+}
+
+/// Where the window's own origin is, when `bounds` is what the window server reports: a shape's bounds
+/// start at the clip's own offset, so that is added back.
+static CGPoint sunbeam_clip_origin(uint32_t wid, CGPoint read)
+{
+    struct sunbeam_clipped *known = sunbeam_clip_find_any(wid);
+    if (!known) return read;
+    return CGPointMake(read.x - known->clip[0], read.y - known->clip[1]);
+}
 
 static bool sunbeam_clip_available(void)
 {
@@ -705,12 +743,15 @@ static bool sunbeam_clip_apply(int cid, uint32_t wid, int owner, const float cli
     if (!sunbeam_clip_available() || sunbeam_clip_matches(wid, owner, clip)) return true;
     CGRect bounds;
     if (SLSGetWindowBounds(cid, wid, &bounds) != kCGErrorSuccess) return false;
+    // Its own size and origin, not the shape's: a window already clipped reports the clip.
+    CGSize size = sunbeam_clip_size(wid, bounds.size);
+    CGPoint origin = sunbeam_clip_origin(wid, bounds.origin);
     CGRect rect = CGRectIntersection(CGRectMake(clip[0], clip[1], clip[2], clip[3]),
-                                     CGRectMake(0, 0, bounds.size.width, bounds.size.height));
+                                     CGRectMake(0, 0, size.width, size.height));
     if (CGRectIsNull(rect) || rect.size.width < 0.5 || rect.size.height < 0.5) rect = CGRectMake(0, 0, 1, 1);
     CFTypeRef region = NULL;
     if (CGSNewRegionWithRect(&rect, &region) != kCGErrorSuccess || !region) return false;
-    CGError error = SLSSetWindowShape(cid, wid, (float)bounds.origin.x, (float)bounds.origin.y, region);
+    CGError error = SLSSetWindowShape(cid, wid, (float)origin.x, (float)origin.y, region);
     CFRelease(region);
     if (error != kCGErrorSuccess) return false;
     struct sunbeam_clipped *clipped = sunbeam_clip_find(wid, owner);
@@ -724,6 +765,7 @@ static bool sunbeam_clip_apply(int cid, uint32_t wid, int owner, const float cli
         clipped->owner = owner;
     }
     memcpy(clipped->clip, clip, sizeof(float) * 4);
+    clipped->size = size;
     clipped->set = true;
     return true;
 }
@@ -735,11 +777,25 @@ static void sunbeam_clip_reset(uint32_t wid, int owner)
     struct sunbeam_clipped *clipped = sunbeam_clip_find(wid, owner);
     if (!clipped) return;
     bool set = clipped->set;
+    CGSize size = clipped->size;
+    float clip[4];
+    memcpy(clip, clipped->clip, sizeof(clip));
     clipped->wid = 0;
     clipped->set = false;
-    if (!set || !sunbeam_clip_available() || !sunbeam_shape_available()) return;
+    if (!set || !sunbeam_clip_available()) return;
+    int cid = SLSMainConnectionID();
     int current = 0;
-    if (SLSGetWindowOwner(SLSMainConnectionID(), wid, &current) == kCGErrorSuccess && current == owner) sunbeam_shape_apply(wid, 0);
+    if (SLSGetWindowOwner(cid, wid, &current) != kCGErrorSuccess || current != owner) return;
+    // Its whole shape back, in the size it had before any clip: read off the window now, it would be
+    // the clip's own shape (a window clipped to a point reads 1 by 1), and the window stayed a point.
+    CGRect bounds;
+    if (SLSGetWindowBounds(cid, wid, &bounds) != kCGErrorSuccess) return;
+    CGRect rect = CGRectMake(0, 0, size.width, size.height);
+    if (rect.size.width < 1 || rect.size.height < 1) { if (sunbeam_shape_available()) sunbeam_shape_apply(wid, 0); return; }
+    CFTypeRef region = NULL;
+    if (CGSNewRegionWithRect(&rect, &region) != kCGErrorSuccess || !region) return;
+    SLSSetWindowShape(cid, wid, (float)(bounds.origin.x - clip[0]), (float)(bounds.origin.y - clip[1]), region);
+    CFRelease(region);
 }
 
 /// The same for a window the lease doesn't hold (one a handoff kept on show, or one entered straight

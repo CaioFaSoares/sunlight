@@ -6,7 +6,7 @@ This is a patch set on top of upstream `main`, not a release frozen on one upstr
 `Info.plist` stays exactly as upstream ships it; the built app is stamped
 `<upstream>-caio.<FORK_REVISION>` with a build number derived from upstream's plus the revision.
 
-Last synced: upstream 0.2.4 (`cf7aa16`), revision 15. The rebase conflicted in `CanvasController`,
+Last synced: upstream 0.2.4 (`cf7aa16`), revision 16. The rebase conflicted in `CanvasController`,
 `WindowCapture`, `Hotkey` and `RealWindowDriver`; every conflict was the fork's own change against
 upstream's `Log.note` rewrite or its closed-by-app fix, and both sides were kept.
 
@@ -150,6 +150,11 @@ one the canvas took from there, or one an old seam left there — comes onto thi
 over there comes back beside the edge it went off, its title bar under the menu bar. Only a window already
 wholly on the display is left alone. On a desk the canvas covers (one display, or a canvas per display)
 no flag is sent and nothing changes.
+
+The clip reads right too: the window server reports a window's *shape* once one is set, so a window
+clipped to a point read 1 by 1 — the settle then "restored" it to that point, and the confine computed the
+window's place from a 1×1 frame. The add-on now remembers each window's own size before its first clip
+(sunlight-62) and puts that back.
 
 The price is the one-canvas mode's own: while Sunlight runs, no window lives on the other screens, so a
 window an app had there is brought onto the main display the first time the canvas steps aside.

@@ -40,11 +40,23 @@ OSStatus SLSMoveWindowWithGroup(int c, uint32_t w, CGPoint *p) { transforms[w] =
 static int txn_moves[10];
 static CGPoint moved_to[10];
 CGError SLSTransactionMoveWindowWithGroup(CFTypeRef t, uint32_t w, CGPoint p) { transforms[w] = CGAffineTransformMakeTranslation(-p.x, -p.y); if (w < 10) { txn_moves[w]++; moved_to[w] = p; } return 0; }
-CGError SLSGetWindowBounds(int c, uint32_t w, CGRect *f) { *f = CGRectMake(-transforms[w].tx, -transforms[w].ty, 400, 300); return 0; }
 // Shapes (sunlight-52): a region is faked as its rectangle count, and what each window was last shaped to.
 // A one-rectangle region keeps the rectangle too, so a clip (sunlight-58) can be read back.
 static int shape_rects[10], shape_sets[10]; static CGPoint shape_at[10]; static CGRect shape_rect[10];
+static bool shape_live[10];   // a one-rectangle shape is set: the window server reports it from then on
 static CGRect last_region; static bool last_region_single;
+// The window server reports a window's *shape* once one is set (sunlight-62): a window clipped to a
+// point reads 1 by 1, which is why the add-on remembers the window's own size.
+CGError SLSGetWindowBounds(int c, uint32_t w, CGRect *f) {
+    if (w < 10 && shape_live[w] && shape_rect[w].size.width > 0 && shape_rect[w].size.height > 0
+        && shape_rect[w].size.width < 400 && shape_rect[w].size.height < 300) {
+        *f = CGRectMake(shape_at[w].x + shape_rect[w].origin.x, shape_at[w].y + shape_rect[w].origin.y,
+                        shape_rect[w].size.width, shape_rect[w].size.height);
+        return 0;
+    }
+    *f = CGRectMake(-transforms[w].tx, -transforms[w].ty, 400, 300);
+    return 0;
+}
 CGError CGSNewRegionWithRect(const CGRect *r, CFTypeRef *out) {
     int one = 1; last_region = *r; last_region_single = true; *out = CFNumberCreate(NULL, kCFNumberIntType, &one); return 0;
 }
@@ -57,7 +69,10 @@ CGError SLSSetWindowShape(int c, uint32_t w, float x, float y, CFTypeRef region)
     if (w >= 10) return kCGErrorFailure;
     int n = 0; CFNumberGetValue(region, kCFNumberIntType, &n);
     shape_rects[w] = n; shape_sets[w]++; shape_at[w] = CGPointMake(x, y);
-    if (last_region_single && n == 1) shape_rect[w] = last_region;
+    // A rounded shape covers the whole window, so the bounds are its own again; a one-rectangle shape
+    // is reported as the bounds (a clip).
+    if (last_region_single && n == 1) { shape_rect[w] = last_region; shape_live[w] = true; }
+    else shape_live[w] = false;
     return 0;
 }
 // What the window server answers about a window's shadow (the active look's density and offset), and
@@ -693,6 +708,13 @@ int main(void) {
         float away[1][4] = {{0, 0, 0, 0}};
         send_clipped(fd, solo4, away, 1, 0, 2);
         assert(shape_rect[4].size.width == 1 && shape_rect[4].size.height == 1);
+        // A clip that grows again: with the window reporting its shape, the size to intersect against
+        // has to be the one remembered before the clip (sunlight-62).
+        float wider[1][4] = {{0, 0, 200, 150}};
+        send_clipped(fd, solo4, wider, 1, 0, 2);
+        assert(shape_rect[4].size.width == 200 && shape_rect[4].size.height == 150);
+        send_clipped(fd, solo4, away, 1, 0, 2);
+        assert(shape_rect[4].size.width == 1);
         // Corners for a tile replace the clip; the canvas's next frame sets the clip again.
         assert(send_shape(fd, 4, 12) == 0 && shape_rects[4] == 25);
         sets = shape_sets[4];

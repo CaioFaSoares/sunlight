@@ -27,7 +27,7 @@ enum LiveWindowsWire {
     /// The add-on this build carries (LiveWindows/osax/common.h). An older one in the Dock still works,
     /// with what it has; the app asks to reload it once it answers.
 
-    static let additionVersion = "sunlight-60"
+    static let additionVersion = "sunlight-61"
     /// The first add-on that holds a lease per canvas, so that every display's canvas can show live
     /// windows; with an older one only the main display's does, and the others show pictures.
     static let leasePerCanvas = 13

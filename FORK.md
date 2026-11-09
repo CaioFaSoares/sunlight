@@ -6,7 +6,7 @@ This is a patch set on top of upstream `main`, not a release frozen on one upstr
 `Info.plist` stays exactly as upstream ships it; the built app is stamped
 `<upstream>-caio.<FORK_REVISION>` with a build number derived from upstream's plus the revision.
 
-Last synced: upstream 0.2.4 (`cf7aa16`), revision 13. The rebase conflicted in `CanvasController`,
+Last synced: upstream 0.2.4 (`cf7aa16`), revision 14. The rebase conflicted in `CanvasController`,
 `WindowCapture`, `Hotkey` and `RealWindowDriver`; every conflict was the fork's own change against
 upstream's `Log.note` rewrite or its closed-by-app fix, and both sides were kept.
 
@@ -142,15 +142,17 @@ made it jump between the two, and the WindowServer work that came with it stalle
 runs there) for seconds.
 
 A canvas that doesn't cover the desk now says so in every live frame (`SUNBEAM_FRAME_CONFINE`,
-add-on sunlight-60, set from `Display.all.count > canvases.count`). A window released at 1:1 from such a
-canvas is moved natively onto the canvas's own display instead (`sunbeam_confined`), wholly on it, beside
-the edge it went off, its title bar under the menu bar — so it is the window the canvas has, on the
-screen it belongs to, and never a window on another screen. A window still on the canvas — even one
-hanging over an edge — is left where it is: that is a window on its screen, as it is without a canvas.
-The windows of an app that takes the front and stays above the canvas while the canvas goes behind it are
-confined too (they are not ordered under the canvas, only placed on its display). On a desk the canvas covers (one display, or
-a canvas per display) nothing changes: the flag is not sent, and a window put back out of view stays
-where the canvas had it.
+add-on sunlight-60, set from `Display.all.count > canvases.count`). Every window it releases is put
+wholly on the canvas's own display (`sunbeam_confined`), at either settle path — the 1:1 seam's native
+move and the plain transform restore of a zoomed release — and for the app that took the front too
+(those are confined without being ordered under the canvas). A window its app has on another screen —
+one the canvas took from there, or one an old seam left there — comes onto this one; one the canvas drew
+over there comes back beside the edge it went off, its title bar under the menu bar. Only a window already
+wholly on the display is left alone. On a desk the canvas covers (one display, or a canvas per display)
+no flag is sent and nothing changes.
+
+The price is the one-canvas mode's own: while Sunlight runs, no window lives on the other screens, so a
+window an app had there is brought onto the main display the first time the canvas steps aside.
 
 ## Build and safety
 

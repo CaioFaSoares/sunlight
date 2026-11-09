@@ -23,7 +23,7 @@
 // it the frame is partial: only transforms, only for the windows in it, and the rest stay as they are.
 // Clips (since sunlight-58): every record carries, after its transform, the part of the window's own
 // points still on its canvas's display (four floats); records are 44 bytes then, not 28.
-// Confine (since sunlight-60): a window released at 1:1 goes to its canvas's display, never to another
+// Confine (since sunlight-60): a window released goes wholly to its canvas's display, never to another
 // one — a desk with displays no canvas covers (the fork's one-canvas mode) would otherwise show it,
 // whole, on the other screen while the canvas is away. See `sunbeam_confined`.
 #define SUNBEAM_FRAME_FULL 0x01
@@ -178,14 +178,13 @@ static CGPoint sunbeam_native_at(CGPoint drawn, double top)
 }
 
 /// The canvas's client says the desk has displays its canvas doesn't cover (`SUNBEAM_FRAME_CONFINE`):
-/// a window it releases at 1:1 is kept on the canvas's display instead of the place the canvas drew it,
-/// which can be over another display's screen.
+/// a window it releases is put wholly on the canvas's display — never where its app has it on another
+/// screen, and never at a canvas place that fell on one.
 static bool sunbeam_confine;
 
-/// Where a window the canvas released at 1:1 sits natively, kept on the canvas's display when the canvas
-/// doesn't cover the desk: `drawn` while any of it is on that display — one hanging over an edge is a
-/// window on its screen, as it is without a canvas — else wholly on it, beside the edge it went off, its
-/// title bar under the menu bar. `backdrop` is the canvas window, which covers exactly that display. A
+/// Where a window the canvas releases sits natively, kept wholly on the canvas's display when the canvas
+/// doesn't cover the desk: `drawn` when it is all on that display already, else the nearest place that is
+/// — beside the edge it went off, its title bar under the menu bar. `backdrop` is the canvas window, which covers exactly that display. A
 /// window bigger than the display keeps its top-left there.
 static CGPoint sunbeam_confined(CGPoint drawn, CGSize size, uint32_t backdrop, double top)
 {
@@ -195,7 +194,7 @@ static CGPoint sunbeam_confined(CGPoint drawn, CGSize size, uint32_t backdrop, d
     if (SLSGetWindowBounds(cid, backdrop, &canvas) != kCGErrorSuccess) return drawn;
     if (canvas.size.width < 1 || canvas.size.height < 1) return drawn;
     CGRect rect = CGRectMake(drawn.x, drawn.y, size.width, size.height);
-    if (CGRectIntersectsRect(canvas, rect)) return drawn;
+    if (CGRectContainsRect(canvas, rect)) return drawn;
     double minY = isfinite(top) && top > canvas.origin.y ? top : canvas.origin.y;
     double x = size.width >= canvas.size.width ? canvas.origin.x
         : fmin(fmax(drawn.x, canvas.origin.x), CGRectGetMaxX(canvas) - size.width);
@@ -204,6 +203,27 @@ static CGPoint sunbeam_confined(CGPoint drawn, CGSize size, uint32_t backdrop, d
     if (!isfinite(x) || !isfinite(y)) return drawn;
     return CGPointMake(x, y);
 }
+
+static CGError sunbeam_transform(CFTypeRef transaction, int cid, uint32_t wid, CGAffineTransform t);
+
+/// A window the canvas released, put wholly on the canvas's display when it isn't (`sunbeam_confined`):
+/// moved natively there and drawn at that place. Its frame is its app's, which can be on another display
+/// — a window the canvas took from there, or one a 1:1 seam put there before the confine existed
+/// (fork #10). Called once the window is out of sight, at the end of its settle.
+static void sunbeam_confine_window(int cid, uint32_t wid, uint32_t confineTo, double top)
+{
+    if (!sunbeam_confine || !confineTo) return;
+    CGRect canvas, frame;
+    if (SLSGetWindowBounds(cid, confineTo, &canvas) != kCGErrorSuccess) return;
+    if (SLSGetWindowBounds(cid, wid, &frame) != kCGErrorSuccess) return;
+    if (canvas.size.width < 1 || canvas.size.height < 1) return;
+    CGPoint place = sunbeam_confined(frame.origin, frame.size, confineTo, top);
+    if (CGPointEqualToPoint(place, frame.origin)) return;
+    CGPoint point = place;
+    SLSMoveWindowWithGroup(cid, wid, &point);
+    sunbeam_transform(NULL, cid, wid, CGAffineTransformMakeTranslation(-place.x, -place.y));
+}
+
 
 static double sunbeam_now(void)
 {
@@ -861,6 +881,7 @@ static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, doubl
     sunbeam_shadow_reset(saved->wid, saved->owner);
     sunbeam_alpha_reset(saved);
     sunbeam_clip_reset(saved->wid, saved->owner);
+    sunbeam_confine_window(cid, saved->wid, confineTo, top);
 }
 
 /// Native sizes a frame later (sunlight-23). The window server takes an order a cycle after a

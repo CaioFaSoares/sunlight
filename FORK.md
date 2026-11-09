@@ -6,7 +6,7 @@ This is a patch set on top of upstream `main`, not a release frozen on one upstr
 `Info.plist` stays exactly as upstream ships it; the built app is stamped
 `<upstream>-caio.<FORK_REVISION>` with a build number derived from upstream's plus the revision.
 
-Last synced: upstream 0.2.4 (`cf7aa16`), revision 14. The rebase conflicted in `CanvasController`,
+Last synced: upstream 0.2.4 (`cf7aa16`), revision 15. The rebase conflicted in `CanvasController`,
 `WindowCapture`, `Hotkey` and `RealWindowDriver`; every conflict was the fork's own change against
 upstream's `Log.note` rewrite or its closed-by-app fix, and both sides were kept.
 

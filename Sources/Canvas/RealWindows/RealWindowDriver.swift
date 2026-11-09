@@ -290,7 +290,7 @@ final class RealWindowDriver: @unchecked Sendable {
     func restore(handoff: (CGWindowID, CGPoint)? = nil, overlay: CGWindowID = 0, backdrop: CGWindowID = 0,
                  shadow: Data? = nil, keeping kept: [(CGWindowID, CGPoint)] = [],
                  clips: [CGWindowID: CGRect]? = nil, top: CGFloat? = nil, above: pid_t = 0,
-                 pinned: [CGWindowID] = []) -> Bool {
+                 pinned: [CGWindowID] = [], confine: Bool = false) -> Bool {
         lock.lock(); generation += 1; pending.clear(); pendingAlpha = [:]; scheduled = false; lock.unlock()
         return Watchdog.during("the Dock's answer to a handoff or release (RealWindowDriver.restore)") { queue.sync {
             defer { connection?.close(); connection = nil }
@@ -302,10 +302,14 @@ final class RealWindowDriver: @unchecked Sendable {
                     // Nothing leased, nothing to put back.
                     if let connection {
                         sendPins(pinned, on: connection)
+                        // The frame that releases the windows says whether they are kept on this
+                        // canvas's display (sunlight-60): the add-on reads the flag from the last frame,
+                        // and an empty one used to clear it just before the release that needs it.
                         try connection.acknowledge(LiveWindowsWire.snapshot([], backdrop: handoffInDock ? backdrop : 0,
                                                                       overlay: handoffInDock ? overlay : 0,
                                                                       kind: partialFramesInDock ? .full : .legacy,
-                                                                      above: liftsCanvasInDock ? above : 0))
+                                                                      above: liftsCanvasInDock ? above : 0,
+                                                                      confine: confine))
                     }
                     return true
                 }

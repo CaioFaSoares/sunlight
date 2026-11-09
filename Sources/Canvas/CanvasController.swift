@@ -897,7 +897,8 @@ final class CanvasController {
             let above: pid_t = NSApp.isActive || front == myPID ? 0 : front
             _ = realWindows.restore(overlay: CGWindowID(window.windowNumber),
                                     backdrop: backdrop.map { CGWindowID($0.windowNumber) } ?? 0,
-                                    above: above, pinned: above != 0 ? pipIDs() : [])
+                                    above: above, pinned: above != 0 ? pipIDs() : [],
+                                    confine: confinesToDisplay)
             // An add-on from sunlight-27 keeps the canvas up above every other window while an app is
             // in front, with that app's windows lifted above it; the canvas comes down only when it
             // goes dormant or lets live windows go.
@@ -1093,9 +1094,8 @@ final class CanvasController {
         // canvas doesn't cover. A tile keeps its corners: no clip.
         let clips = flagged && additionNumber >= LiveWindowsWire.clipsFrom
         // A desk with displays this canvas doesn't cover (one canvas, the others macOS's own): a window
-        // it releases at 1:1 is kept on this display, never on another screen (fork `#10`, sunlight-60).
-        let confine = flagged && additionNumber >= LiveWindowsWire.confinesFrom
-            && (desk?.canvases.count ?? 1) < Display.all.count
+        // it releases is kept on this display, never on another screen (fork `#10`, sunlight-60).
+        let confine = confinesToDisplay
         let limit = LiveWindowsWire.windowLimit(clips: clips)
         let camera = view.camera
         let wire = global(camera)   // the add-on places windows in global points
@@ -1190,6 +1190,13 @@ final class CanvasController {
                                                      clips: clips, confine: confine),
                                shadow: shadow, full: full, alphas: alphas)
         } catch { fallBackFromRealWindows(error.localizedDescription) }
+    }
+
+    /// Whether a window this canvas releases is kept on its display (`LiveWindowsWire.frameConfine`,
+    /// sunlight-60): the desk has displays no canvas covers. Sent in every frame, the empty one that
+    /// releases the windows included — the add-on reads the flag from the last frame it saw.
+    private var confinesToDisplay: Bool {
+        additionNumber >= LiveWindowsWire.confinesFrom && (desk?.canvases.count ?? 1) < Display.all.count
     }
 
     /// The live timer runs only while real windows are presented: it is the lease's keepalive (the Dock

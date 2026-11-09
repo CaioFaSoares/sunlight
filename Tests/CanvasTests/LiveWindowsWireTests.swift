@@ -343,5 +343,10 @@ final class LiveWindowsWireTests: XCTestCase {
         XCTAssertTrue(LiveWindowsWire.confinesInDock(LiveWindowsWire.additionVersion))
         XCTAssertFalse(LiveWindowsWire.confinesInDock("sunlight-59"))
         XCTAssertFalse(LiveWindowsWire.confinesInDock(nil))
+        // The empty frame that releases the windows carries it too: the add-on reads the flag from the
+        // last frame it sees, so one without it cleared the confine just before the release.
+        let release = try LiveWindowsWire.snapshot([], backdrop: 2, overlay: 3, kind: .full, above: 99, confine: true)
+        XCTAssertEqual(release.count, 18)   // 2 length, opcode, header with flags, and the front app's pid
+        XCTAssertEqual(release[13], LiveWindowsWire.frameFull | LiveWindowsWire.frameConfine)
     }
 }

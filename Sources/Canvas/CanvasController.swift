@@ -8083,6 +8083,23 @@ final class CanvasController {
         }
     }
 
+    /// Where a window drawn at `drawn` (screen points) sits so that it is wholly on `display`, its title
+    /// bar under the menu bar: `drawn` itself when it is already. The rule the add-on applies at a
+    /// release (fork #10), worked out here too, where the window's size is known: a window its app has on
+    /// another screen — or one the canvas drew there — is put back on this canvas's display before the
+    /// lease lets go of it, so it can't appear whole on the other screen while the canvas is away.
+    nonisolated static func confined(_ drawn: CGRect, in display: CGRect, top: CGFloat) -> CGPoint {
+        guard display.width > 1, display.height > 1, drawn.width > 0, drawn.height > 0,
+              drawn.width.isFinite, drawn.height.isFinite else { return drawn.origin }
+        if display.contains(drawn) { return drawn.origin }
+        let minY = max(display.minY, top.isFinite ? top : display.minY)
+        let x = drawn.width >= display.width ? display.minX
+            : min(max(drawn.minX, display.minX), display.maxX - drawn.width)
+        let y = drawn.height >= display.maxY - minY ? minY
+            : min(max(drawn.minY, minY), display.maxY - drawn.height)
+        return CGPoint(x: x, y: y)
+    }
+
     /// Where a window of `size` sits in the middle of `area`, its top never above it.
     nonisolated static func centred(_ size: CGSize, in area: CGRect) -> CGPoint {
         CGPoint(x: (area.midX - size.width / 2).rounded(), y: max(area.minY, (area.midY - size.height / 2).rounded()))

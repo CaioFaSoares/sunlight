@@ -210,15 +210,27 @@ static CGError sunbeam_transform(CFTypeRef transaction, int cid, uint32_t wid, C
 /// moved natively there and drawn at that place. Its frame is its app's, which can be on another display
 /// — a window the canvas took from there, or one a 1:1 seam put there before the confine existed
 /// (fork #10). Called once the window is out of sight, at the end of its settle.
-static void sunbeam_confine_window(int cid, uint32_t wid, uint32_t confineTo, double top)
+static void sunbeam_confine_window(int cid, uint32_t wid, uint32_t confineTo, double top, CGAffineTransform own)
 {
     if (!sunbeam_confine || !confineTo) return;
     CGRect canvas, frame;
     if (SLSGetWindowBounds(cid, confineTo, &canvas) != kCGErrorSuccess) return;
-    if (SLSGetWindowBounds(cid, wid, &frame) != kCGErrorSuccess) return;
     if (canvas.size.width < 1 || canvas.size.height < 1) return;
-    CGPoint place = sunbeam_confined(frame.origin, frame.size, confineTo, top);
-    if (CGPointEqualToPoint(place, frame.origin)) return;
+    // Its own place and size, from the lease — not from the window server, which reports the *shape*
+    // once one is set (a window clipped to a point reads 1 by 1). The transform is the one it is put
+    // back to, so it says where the window is: a translation by minus its origin.
+    double a = fabs(own.a) > 1e-3 ? own.a : 1, d = fabs(own.d) > 1e-3 ? own.d : 1;
+    CGPoint native = CGPointMake(-own.tx / a, -own.ty / d);
+    CGSize size = CGSizeZero;
+    if (SLSGetWindowBounds(cid, wid, &frame) == kCGErrorSuccess) size = frame.size;
+    // A window that fits its display, whose place isn't on it at all: only those are moved. One
+    // hanging over an edge is a window on its screen, and one bigger than the display has nowhere to go.
+    if (size.width < 32 || size.height < 32) return;
+    if (size.width > canvas.size.width || size.height > canvas.size.height) return;
+    CGRect there = CGRectMake(native.x, native.y, size.width, size.height);
+    if (CGRectIntersectsRect(there, canvas)) return;
+    CGPoint place = sunbeam_confined(native, size, confineTo, top);
+    if (CGPointEqualToPoint(place, native)) return;
     CGPoint point = place;
     SLSMoveWindowWithGroup(cid, wid, &point);
     sunbeam_transform(NULL, cid, wid, CGAffineTransformMakeTranslation(-place.x, -place.y));
@@ -937,7 +949,7 @@ static void sunbeam_settle(struct sunbeam_saved *saved, uint32_t backdrop, doubl
     sunbeam_shadow_reset(saved->wid, saved->owner);
     sunbeam_alpha_reset(saved);
     sunbeam_clip_reset(saved->wid, saved->owner);
-    sunbeam_confine_window(cid, saved->wid, confineTo, top);
+    sunbeam_confine_window(cid, saved->wid, confineTo, top, saved->transform);
 }
 
 /// Native sizes a frame later (sunlight-23). The window server takes an order a cycle after a

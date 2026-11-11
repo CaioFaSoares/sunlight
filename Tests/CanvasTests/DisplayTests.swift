@@ -46,6 +46,26 @@ final class DisplayTests: XCTestCase {
         XCTAssertEqual(global.toWorld(inGlobal).x, world.x, accuracy: 1e-9)
     }
 
+    /// A released window is put wholly on its canvas's display (fork #10): one drawn over another
+    /// screen comes back beside the edge it went off, its title bar under the menu bar.
+    func testConfinedPutsAWindowBackOnItsDisplay() {
+        let display = CGRect(x: 0, y: 0, width: 2560, height: 1440)
+        let inside = CGRect(x: 100, y: 100, width: 400, height: 300)
+        XCTAssertEqual(CanvasController.confined(inside, in: display, top: 25), inside.origin)
+        // Entirely past the right edge, on the other display: its right edge comes to this one.
+        let over = CGRect(x: 2570, y: 316, width: 2274, height: 908)
+        XCTAssertEqual(CanvasController.confined(over, in: display, top: 25), CGPoint(x: 286, y: 316))
+        // Wider than the display: its top-left sits at the display's.
+        let wide = CGRect(x: 3000, y: 200, width: 3000, height: 900)
+        XCTAssertEqual(CanvasController.confined(wide, in: display, top: 25), CGPoint(x: 0, y: 200))
+        // Above the top edge: under the menu bar.
+        let high = CGRect(x: 100, y: -300, width: 400, height: 300)
+        XCTAssertEqual(CanvasController.confined(high, in: display, top: 25), CGPoint(x: 100, y: 25))
+        // Below the bottom edge.
+        let low = CGRect(x: 100, y: 1500, width: 400, height: 300)
+        XCTAssertEqual(CanvasController.confined(low, in: display, top: 25), CGPoint(x: 100, y: 1140))
+    }
+
     func testHomeCameraShowsTheDisplayAtOneToOne() {
         let o = CGPoint(x: -1920, y: 0)
         let home = Camera.home(viewOrigin: o)
